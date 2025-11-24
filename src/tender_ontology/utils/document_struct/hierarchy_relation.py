@@ -50,14 +50,14 @@ def extract_heading_candidates(
     include_all_lines: bool = False
 ) -> List[Dict[str, Any]]:
     """
-    提取标题候选项及其特征
+    提取标题候选项（纯文本版本）
 
     Args:
         lines_data: 行数据列表
         include_all_lines: 是否包含所有行（如果为 False，只包含标签为 section_header 的行）
 
     Returns:
-        标题候选列表，包含特征信息
+        标题候选列表（只包含 id, text, page，不包含版面特征）
     """
     candidates = []
 
@@ -74,14 +74,11 @@ def extract_heading_candidates(
         if not include_all_lines and label != "section_header":
             continue
 
-        # 提取特征
-        features = extract_line_features(line)
-
+        # 纯文本版本：只保留 id, text, page（不包含版面特征）
         candidate = {
             "id": item_id,
             "text": text,
-            "page": page,
-            "features": features
+            "page": page
         }
 
         candidates.append(candidate)
@@ -286,7 +283,7 @@ def build_document_hierarchy_from_relations(
         raise
 
 
-def _call_text_api(client, prompt: str, temperature: float, verbose: bool, max_tokens: int = 4096) -> str:
+def _call_text_api(client, prompt: str, temperature: float, verbose: bool, max_tokens: Optional[int] = None) -> str:
     """
     调用纯文本 API
 
@@ -295,7 +292,7 @@ def _call_text_api(client, prompt: str, temperature: float, verbose: bool, max_t
         prompt: 提示词
         temperature: 温度参数
         verbose: 是否打印详细信息
-        max_tokens: 最大输出 tokens 数
+        max_tokens: 最大输出 tokens 数（None 表示不限制，由模型自动决定）
 
     Returns:
         AI 响应文本

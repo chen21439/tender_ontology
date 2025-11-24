@@ -55,7 +55,7 @@ class BaiduTextClient:
         system_prompt: Optional[str] = None,
         temperature: float = 0.000001,
         top_p: float = 1.0,
-        max_tokens: int = 4096,
+        max_tokens: Optional[int] = None,
         verbose: bool = True
     ) -> str:
         """
@@ -66,7 +66,7 @@ class BaiduTextClient:
             system_prompt: 系统提示词（可选）
             temperature: 温度参数（0-1）
             top_p: top_p 参数（0-1）
-            max_tokens: 最大生成 token 数
+            max_tokens: 最大生成 token 数（None 表示不限制，由模型自动决定）
             verbose: 是否打印详细信息
 
         Returns:
@@ -91,9 +91,12 @@ class BaiduTextClient:
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "top_p": top_p,
-            "max_tokens": max_tokens
+            "top_p": top_p
         }
+
+        # 只在指定时添加 max_tokens
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
 
         # 设置 Header（Bearer 鉴权）
         headers = {
