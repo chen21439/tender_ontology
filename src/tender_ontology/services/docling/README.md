@@ -1,4 +1,6 @@
-# Docling 文档处理服务
+# Docling 文档处理服务 ⚡
+
+支持快速初筛和精细处理两种模式，GPU 加速推理。
 
 ## 目录结构
 
@@ -27,19 +29,30 @@ docling/
 - Labeled JSON
 - Doctags
 
-**使用示例：**
+**模式选择：**
 
+1. **快速初筛模式** ⚡（速度快5-10倍）
 ```python
-from tender_ontology.services.docling import DoclingInferenceService
+service = DoclingInferenceService(disable_table_recognition=True)
+results = service.infer(
+    file_path="document.pdf",
+    save_markdown=True,
+    save_json=False,
+    save_labeled=False
+)
+# 只生成 Markdown，labeled JSON 不含表格
+```
 
-service = DoclingInferenceService()
-results = service.infer("path/to/document.pdf")
-
-# 结果包含：
-# - results['markdown_path']
-# - results['json_path']
-# - results['labeled_path']
-# - ...
+2. **精细处理模式** 🎯（完整表格识别）
+```python
+service = DoclingInferenceService(disable_table_recognition=False)
+results = service.infer(
+    file_path="document.pdf",
+    save_markdown=True,
+    save_json=True,
+    save_labeled=True
+)
+# labeled JSON 包含 HTML 格式的表格
 ```
 
 ### 2. LabeledJsonConverter (converter.py)

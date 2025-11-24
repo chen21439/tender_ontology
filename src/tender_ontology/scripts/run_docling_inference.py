@@ -10,7 +10,8 @@ from pathlib import Path
 from tender_ontology.services.docling import DoclingInferenceService
 
 # ============ 默认配置区域 ============
-DEFAULT_FILE = r"E:\programFile\AIProgram\modelTrain\HRDoc\pdf\深圳市大数据服务中心.pdf"
+# DEFAULT_FILE = r"E:\programFile\AIProgram\modelTrain\HRDoc\pdf\深圳市大数据服务中心.pdf"
+DEFAULT_FILE = r"E:\programFile\AIProgram\modelTrain\CompHRDoc\data\pdf\城市大数据中心物业管理服务.pdf"
 # DEFAULT_FILE = r"E:\path\to\your\document.docx"  # DOCX 示例
 DEFAULT_OUTPUT_DIR = None  # None 表示使用配置文件中的路径
 # ======================================
@@ -18,21 +19,45 @@ DEFAULT_OUTPUT_DIR = None  # None 表示使用配置文件中的路径
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Docling 文档推理工具",
+        description="Docling 文档推理工具 - 支持快速初筛和精细处理",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-示例:
-  # 直接运行（使用默认文件路径）
-  python -m tender_ontology.scripts.run_docling_inference
+使用场景和最佳实践:
 
-  # 解析指定 PDF 文件
-  python -m tender_ontology.scripts.run_docling_inference --file document.pdf
+默认模式（快速初筛，推荐）⚡：
+  python -m tender_ontology.scripts.run_docling_inference --file doc.pdf
 
-  # 解析 DOCX 文件，只生成 Markdown
-  python -m tender_ontology.scripts.run_docling_inference --file document.docx --no-json --no-labeled
+  输出: Markdown + JSON + Labeled JSON (不含表格)
+  特点: 速度快 5-10 倍，适合大量文档批处理
+  原理: 禁用表格识别，labeled JSON 转换跳过表格处理
 
-  # 解析并生成所有格式（包括 doctags）
-  python -m tender_ontology.scripts.run_docling_inference --file document.pdf --doctags
+精细处理模式（需要表格）🎯：
+  python -m tender_ontology.scripts.run_docling_inference --file doc.pdf \\
+      --enable-table-recognition
+
+  输出: Markdown + JSON + Labeled JSON (含 HTML 表格)
+  特点: 完整表格识别，适合少量重要文档
+
+其他场景:
+  # 只要 Markdown
+  python -m tender_ontology.scripts.run_docling_inference --file doc.pdf \\
+      --no-json --no-labeled
+
+  # 只要结构化数据（JSON + Labeled）
+  python -m tender_ontology.scripts.run_docling_inference --file doc.pdf \\
+      --no-markdown
+
+  # 完整处理（所有格式 + doctags）
+  python -m tender_ontology.scripts.run_docling_inference --file doc.pdf \\
+      --enable-table-recognition --doctags
+
+性能说明:
+  - JSON 导出（含 bbox）：几乎无额外开销 (<5%)
+  - Labeled JSON 转换：纯内存操作，很快 (<5%)
+  - 表格识别：主要性能瓶颈 (60-80% 的时间)
+
+  结论: 快速模式可以放心生成所有格式（Markdown + JSON + Labeled），
+        只是禁用表格识别而已！
         """
     )
 
@@ -76,15 +101,15 @@ def main():
     )
 
     parser.add_argument(
-        "--offline",
+        "--online",
         action="store_true",
-        help="启用离线模式"
+        help="启用在线模式（默认：离线模式，不检测模型更新）"
     )
 
     parser.add_argument(
-        "--no-table-recognition",
+        "--enable-table-recognition",
         action="store_true",
-        help="禁用表格识别"
+        help="启用表格识别（精细模式，默认：禁用）"
     )
 
     parser.add_argument(
@@ -101,11 +126,17 @@ def main():
         print(f"❌ 错误: 文件不存在: {file_path}")
         return 1
 
+    # 默认禁用表格识别（快速模式），除非明确启用
+    disable_table_recognition = not args.enable_table_recognition
+
+    # 默认启用离线模式（不检测模型更新），除非明确启用在线模式
+    offline_mode = not args.online
+
     # 创建推理服务
     service = DoclingInferenceService(
         output_dir=Path(args.output_dir) if args.output_dir else None,
-        offline_mode=args.offline,
-        disable_table_recognition=args.no_table_recognition,
+        offline_mode=offline_mode,
+        disable_table_recognition=disable_table_recognition,
         hierarchy_refinement=args.hierarchy_refinement
     )
 

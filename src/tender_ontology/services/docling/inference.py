@@ -96,6 +96,9 @@ class DoclingInferenceService:
         if is_pdf:
             print(f"表格识别: {'❌ 已关闭' if self.disable_table_recognition else '✅ 已启用'}")
 
+        # 记录总开始时间
+        total_start_time = time.time()
+
         # 导入 docling 依赖
         try:
             from docling.document_converter import DocumentConverter, PdfFormatOption
@@ -105,8 +108,9 @@ class DoclingInferenceService:
         except ImportError as e:
             raise ImportError(f"docling 未安装: {e}. 请运行: poetry add docling")
 
-        # 创建转换器
-        print("\n[1/3] 初始化 DocumentConverter...")
+        # 创建转换器（包含模型加载）
+        print("\n[1/4] 初始化 DocumentConverter（模型加载）...")
+        init_start_time = time.time()
         if is_pdf:
             opts = PdfPipelineOptions(
                 do_ocr=False,
@@ -127,11 +131,15 @@ class DoclingInferenceService:
         else:
             converter = DocumentConverter(allowed_formats=[InputFormat.DOCX])
 
+        init_time = time.time() - init_start_time
+        print(f"      ✅ 模型加载完成，耗时: {init_time:.2f} 秒")
+
         # 执行转换
-        print(f"[2/3] 正在提取{'PDF' if is_pdf else 'DOCX'}文档结构...")
-        start_time = time.time()
+        print(f"[2/4] 正在提取{'PDF' if is_pdf else 'DOCX'}文档结构...")
+        convert_start_time = time.time()
         result = converter.convert(source=str(file_path))
-        inference_time = time.time() - start_time
+        convert_time = time.time() - convert_start_time
+        print(f"      ✅ 文档推理完成，耗时: {convert_time:.2f} 秒")
 
         # 层级修正（可选）
         if self.hierarchy_refinement and is_pdf:
@@ -148,13 +156,17 @@ class DoclingInferenceService:
         doc = result.document
 
         # 保存结果
-        print("[3/3] 保存结果...")
+        print("[3/4] 层级修正...")
+        print("      ⏭️  跳过（未启用）")
+
+        print("[4/4] 保存结果...")
+        save_start_time = time.time()
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         doc_name = file_path.stem
 
         results = {
             "document_name": doc_name,
-            "inference_time": inference_time,
+            "convert_time": convert_time,
             "timestamp": timestamp
         }
 
@@ -191,13 +203,18 @@ class DoclingInferenceService:
                 results["json_path"] = str(json_path)
                 print(f"  ✅ JSON 已保存: {json_path.name}")
 
-        # 3. Labeled JSON
+        # 3. Labeled JSON (只在启用表格识别时处理表格)
         if save_labeled and json_data:
             labeled_path = self.output_dir / f"{doc_name}_{timestamp}_labeled.json"
-            converter = LabeledJsonConverter(debug=False)
+            # 传递 table_recognition 参数，让转换器知道是否需要处理表格
+            converter = LabeledJsonConverter(
+                debug=False,
+                process_tables=not self.disable_table_recognition
+            )
             converter.convert_and_save(json_data, labeled_path)
             results["labeled_path"] = str(labeled_path)
-            print(f"  ✅ Labeled JSON 已保存: {labeled_path.name}")
+            table_status = "含表格" if not self.disable_table_recognition else "不含表格"
+            print(f"  ✅ Labeled JSON 已保存: {labeled_path.name} ({table_status})")
 
         # 4. Doctags
         if save_doctags:
@@ -207,7 +224,24 @@ class DoclingInferenceService:
             results["doctags_path"] = str(doctags_path)
             print(f"  ✅ Doctags 已保存: {doctags_path.name}")
 
-        print(f"\n✅ 推理完成! 耗时: {inference_time:.2f} 秒")
+        save_time = time.time() - save_start_time
+        total_time = time.time() - total_start_time
+
+        # 统计结果
+        results.update({
+            "init_time": init_time,
+            "save_time": save_time,
+            "total_time": total_time
+        })
+
+        print(f"\n{'='*80}")
+        print("⏱️  耗时统计:")
+        print(f"{'='*80}")
+        print(f"  [1] 模型加载:     {init_time:.2f} 秒 ({init_time/total_time*100:.1f}%)")
+        print(f"  [2] 文档推理:     {convert_time:.2f} 秒 ({convert_time/total_time*100:.1f}%)")
+        print(f"  [3] 文件保存:     {save_time:.2f} 秒 ({save_time/total_time*100:.1f}%)")
+        print(f"  {'─'*76}")
+        print(f"  ✅ 总计:          {total_time:.2f} 秒")
         print(f"{'='*80}\n")
 
         return results

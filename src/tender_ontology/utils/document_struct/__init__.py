@@ -31,6 +31,13 @@ from .hierarchy_relation import (
     construct_hierarchy_tree
 )
 
+# 树构建算法（基于论文）
+from .tree import (
+    TreeConstructor,
+    TreeNode,
+    construct_tree_from_predictions
+)
+
 __all__ = [
     # 图像客户端
     "BaiduImageClientBearer",
@@ -48,4 +55,8 @@ __all__ = [
     "process_document_hierarchy_relations",
     "extract_heading_candidates",
     "construct_hierarchy_tree",
+    # 树构建算法
+    "TreeConstructor",
+    "TreeNode",
+    "construct_tree_from_predictions",
 ]

@@ -38,6 +38,12 @@ def load_tagged_document(json_path: str) -> List[Dict[str, Any]]:
     """
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
+
+    # 如果是新格式（包含 document_name, items），提取 items
+    if isinstance(data, dict) and "items" in data:
+        return data["items"]
+
+    # 否则假设是旧格式（直接是数组）
     return data
 
 
@@ -50,7 +56,7 @@ def extract_heading_candidates(
 
     Args:
         lines_data: 行数据列表
-        include_all_lines: 是否包含所有行（如果为 False，只包含 class=Section 的行）
+        include_all_lines: 是否包含所有行（如果为 False，只包含标签为 section_header 的行）
 
     Returns:
         标题候选列表，包含特征信息
@@ -59,23 +65,29 @@ def extract_heading_candidates(
 
     for line in lines_data:
         text = line.get("text", "").strip()
-        class_label = line.get("class", "")
-        line_id = line.get("line_id", "")
-        page = line.get("page", "")
+
+        # 兼容新旧格式
+        # 新格式：label, id, page_no
+        # 旧格式：class, line_id, page
+        label = line.get("label", line.get("class", ""))
+        item_id = line.get("id", line.get("line_id", ""))
+        page = line.get("page_no", line.get("page", ""))
 
         if not text:
             continue
 
         # 如果只包含章节，则过滤
-        if not include_all_lines and class_label != "Section":
-            continue
+        # 新格式用 section_header，旧格式用 Section
+        if not include_all_lines:
+            if label not in ["section_header", "Section"]:
+                continue
 
         # 提取特征（这里使用占位值，实际应该从文档中提取）
         # TODO: 实现真实的特征提取逻辑
         features = extract_line_features(line)
 
         candidate = {
-            "id": line_id,
+            "id": item_id,
             "text": text,
             "page": page,
             "features": features
@@ -535,17 +547,27 @@ def process_document_hierarchy_relations(
 
 
 if __name__ == "__main__":
-    # 自动切换到项目根目录
-    # 从当前文件向上找到项目根目录（包含 pyproject.toml 的目录）
-    current_file = Path(__file__).resolve()
-    project_root = current_file.parent.parent.parent.parent.parent  # 向上5级到项目根
-
-    if project_root.exists():
-        os.chdir(project_root)
-        print(f"[HierarchyRelation] 工作目录已切换到: {project_root}")
-
     # 测试示例
-    json_path = "static/artifact/docling/城市大数据中心物业管理服务_tagged_20251123_175828.json"
+    # 输入文件名前缀，自动查找最新的 labeled.json
+    doc_name = "深圳市大数据服务中心"
+    artifact_dir = Path("static") / "artifact" / "docling"
+
+    # 查找所有匹配的 labeled.json 文件
+    pattern = f"{doc_name}_*_labeled.json"
+    matching_files = list(artifact_dir.glob(pattern))
+
+    if not matching_files:
+        print(f"[错误] 未找到匹配的文件: {artifact_dir / pattern}")
+        print(f"[调试] 当前工作目录: {os.getcwd()}")
+        print(f"[调试] artifact_dir 是否存在: {artifact_dir.exists()}")
+        if artifact_dir.exists():
+            all_files = list(artifact_dir.glob("*.json"))
+            print(f"[调试] 目录中所有 JSON 文件: {[f.name for f in all_files[:5]]}")
+        exit(1)
+
+    # 按文件名排序（时间戳在文件名中），取最新的
+    json_path = str(sorted(matching_files)[-1])
+    print(f"[HierarchyRelation] 找到文件: {json_path}")
 
     print("""
 [HierarchyRelation] 文档层级目录构建工具（关系预测方法）

@@ -15,14 +15,16 @@ from pathlib import Path
 class LabeledJsonConverter:
     """将 Docling 完整 JSON 转换为精简的 labeled JSON"""
 
-    def __init__(self, debug: bool = False):
+    def __init__(self, debug: bool = False, process_tables: bool = True):
         """
         初始化转换器
 
         Args:
             debug: 是否启用调试输出
+            process_tables: 是否处理表格 (False 时跳过表格转换，节省时间)
         """
         self.debug = debug
+        self.process_tables = process_tables
         self.ref_map = {}
 
     def convert(self, docling_json: Dict[str, Any]) -> Dict[str, Any]:
@@ -74,24 +76,29 @@ class LabeledJsonConverter:
                 "bbox": bbox
             })
 
-        # 添加 tables
-        for table_idx, table in enumerate(docling_json.get("tables", [])):
-            self_ref = table.get("self_ref", "")
-            order_idx = element_order.get(self_ref, 999999)
+        # 添加 tables (只在 process_tables=True 时处理)
+        if self.process_tables:
+            for table_idx, table in enumerate(docling_json.get("tables", [])):
+                self_ref = table.get("self_ref", "")
+                order_idx = element_order.get(self_ref, 999999)
 
-            # 提取 page_no 和 bbox
-            page_no, bbox = self._extract_prov_info(table)
+                # 提取 page_no 和 bbox
+                page_no, bbox = self._extract_prov_info(table)
 
-            # 转换表格为 HTML 字符串
-            table_html = self._table_to_html(table.get("data", {}), table_idx)
+                # 转换表格为 HTML 字符串
+                table_html = self._table_to_html(table.get("data", {}), table_idx)
 
-            all_elements.append({
-                "order": order_idx,
-                "label": "table",
-                "text": table_html,
-                "page_no": page_no,
-                "bbox": bbox
-            })
+                all_elements.append({
+                    "order": order_idx,
+                    "label": "table",
+                    "text": table_html,
+                    "page_no": page_no,
+                    "bbox": bbox
+                })
+        elif self.debug:
+            table_count = len(docling_json.get("tables", []))
+            if table_count > 0:
+                print(f"  [DEBUG] 跳过 {table_count} 个表格的处理 (process_tables=False)")
 
         # 按文档顺序排序
         all_elements.sort(key=lambda x: x["order"])
