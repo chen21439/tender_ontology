@@ -27,8 +27,7 @@ from .hierarchy_builder import (
 # 文档层级构建（关系预测方法）
 from .hierarchy_relation import (
     process_document_hierarchy_relations,
-    extract_heading_candidates,
-    construct_hierarchy_tree
+    extract_heading_candidates
 )
 
 # 树构建算法（基于论文）
@@ -54,7 +53,6 @@ __all__ = [
     # 层级构建（关系预测方法）
     "process_document_hierarchy_relations",
     "extract_heading_candidates",
-    "construct_hierarchy_tree",
     # 树构建算法
     "TreeConstructor",
     "TreeNode",

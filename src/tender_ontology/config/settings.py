@@ -20,6 +20,17 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite:///./tender_ontology.db"
 
+    # MySQL Database (for PDF upload tasks)
+    mysql_host: str = "172.16.0.116"
+    mysql_port: int = 3306
+    mysql_user: str = "root"
+    mysql_password: str = "123456"
+    mysql_database: str = "tender_compliance"
+    mysql_charset: str = "utf8mb4"
+
+    # File Storage
+    file_storage_base: str = "static"
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

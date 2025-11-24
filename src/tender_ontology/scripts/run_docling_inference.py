@@ -4,10 +4,17 @@ Docling 文档推理脚本
 直接运行此脚本进行文档解析，生成 Markdown、JSON、Labeled JSON 等格式
 """
 
+import sys
+import io
 import argparse
 from pathlib import Path
 
 from tender_ontology.services.docling import DoclingInferenceService
+
+# 设置控制台输出编码为 UTF-8
+if sys.platform == 'win32':
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # ============ 默认配置区域 ============
 # DEFAULT_FILE = r"E:\programFile\AIProgram\modelTrain\HRDoc\pdf\深圳市大数据服务中心.pdf"

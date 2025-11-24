@@ -4,7 +4,8 @@
 """
 import requests
 import json
-from typing import Optional
+from typing import Optional, Union
+from tender_ontology.config.model_config import BaiduModel, DefaultModels
 
 
 class BaiduTextClient:
@@ -12,31 +13,40 @@ class BaiduTextClient:
 
     # 默认配置
     DEFAULT_API_KEY = "bce-v3/ALTAK-JkjnSArfweuMYH0Rr0RIN/45271747bda2067bcc0c855c7a6b6f61edd5b51f"
-    DEFAULT_MODEL = "ernie-4.0-turbo-8k"  # 默认使用 ERNIE-4.0-Turbo
+    DEFAULT_MODEL = DefaultModels.TEXT_GENERATION
 
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = DEFAULT_MODEL
+        model: Union[str, BaiduModel] = None
     ):
         """
         初始化百度千帆文本客户端
 
         Args:
             api_key: 百度 API Key（bce-v3/ALTAK...格式）
-            model: 模型名称，默认 ernie-4.0-turbo-8k
-                可选模型：
-                - ernie-4.0-turbo-8k: ERNIE 4.0 Turbo（推荐）
-                - ernie-4.0-8k: ERNIE 4.0
-                - ernie-3.5-8k: ERNIE 3.5
-                - ernie-speed-8k: ERNIE Speed（高速）
+            model: 模型名称或枚举，默认使用 DefaultModels.TEXT_GENERATION
         """
         self.api_key = api_key or self.DEFAULT_API_KEY
-        self.model = model
+
+        # 如果没有指定模型，使用默认模型
+        if model is None:
+            model = self.DEFAULT_MODEL
+
+        # 支持字符串和枚举
+        if isinstance(model, BaiduModel):
+            self.model = model.value
+            self.model_enum = model
+        else:
+            self.model = model
+            self.model_enum = None
+
         self.base_url = "https://qianfan.baidubce.com/v2/chat/completions"
 
         print(f"[BaiduTextClient] 初始化完成")
-        print(f"  - Model: {model}")
+        print(f"  - Model: {self.model}")
+        if self.model_enum:
+            print(f"  - Display Name: {self.model_enum.display_name}")
         print(f"  - API Key: {self.api_key[:20]}...{self.api_key[-10:]}")
 
     def send_request(
@@ -45,7 +55,7 @@ class BaiduTextClient:
         system_prompt: Optional[str] = None,
         temperature: float = 0.000001,
         top_p: float = 1.0,
-        max_tokens: int = 2048,
+        max_tokens: int = 4096,
         verbose: bool = True
     ) -> str:
         """
@@ -101,13 +111,19 @@ class BaiduTextClient:
             print(f"{'=' * 80}\n")
 
         # 发送 POST 请求
+        import time
+        start_time = time.time()
+
         try:
             response = requests.post(
                 self.base_url,
                 headers=headers,
                 json=payload,
-                timeout=120
+                timeout=300  # 增加超时时间到5分钟
             )
+
+            elapsed_time = time.time() - start_time
+
             response.raise_for_status()
 
             # 解析响应
@@ -128,7 +144,10 @@ class BaiduTextClient:
                 print(f"\n{'=' * 80}")
                 print(f"[BaiduTextClient] 收到响应")
                 print(f"{'=' * 80}")
-                print(answer[:500] + ("..." if len(answer) > 500 else ""))
+                print(f"耗时: {elapsed_time:.2f} 秒")
+                print(f"响应长度: {len(answer):,} 字符")
+                print(f"响应内容 (前1000字):")
+                print(answer[:1000] + ("..." if len(answer) > 1000 else ""))
                 print(f"{'=' * 80}\n")
 
             return answer

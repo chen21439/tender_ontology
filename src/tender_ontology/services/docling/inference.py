@@ -13,6 +13,7 @@ from typing import Dict, Any, Optional, Union
 
 from tender_ontology.config.docling_settings import docling_settings
 from .converter import LabeledJsonConverter
+from .artifact_converter import SectionHeaderConverter
 
 
 class DoclingInferenceService:
@@ -60,7 +61,8 @@ class DoclingInferenceService:
         save_markdown: bool = True,
         save_json: bool = True,
         save_labeled: bool = True,
-        save_doctags: bool = False
+        save_doctags: bool = False,
+        save_headers: bool = True
     ) -> Dict[str, Any]:
         """
         对文档进行推理
@@ -71,6 +73,7 @@ class DoclingInferenceService:
             save_json: 是否保存完整 JSON
             save_labeled: 是否保存 labeled JSON
             save_doctags: 是否保存 doctags
+            save_headers: 是否保存 section headers JSON
 
         Returns:
             包含推理结果和文件路径的字典
@@ -179,7 +182,7 @@ class DoclingInferenceService:
 
         # 2. 完整 JSON
         json_data = None
-        if save_json or save_labeled:
+        if save_json or save_labeled or save_headers:
             json_path = self.output_dir / f"{doc_name}_{timestamp}.json"
 
             if hasattr(doc, 'export_to_json'):
@@ -223,6 +226,14 @@ class DoclingInferenceService:
             doctags_path.write_text(doctags_content, encoding='utf-8')
             results["doctags_path"] = str(doctags_path)
             print(f"  ✅ Doctags 已保存: {doctags_path.name}")
+
+        # 5. Section Headers JSON
+        if save_headers and json_data:
+            headers_path = self.output_dir / f"{doc_name}_{timestamp}_headers.json"
+            header_converter = SectionHeaderConverter(debug=False)
+            header_converter.convert_and_save(json_data, headers_path)
+            results["headers_path"] = str(headers_path)
+            print(f"  ✅ Headers JSON 已保存: {headers_path.name}")
 
         save_time = time.time() - save_start_time
         total_time = time.time() - total_start_time

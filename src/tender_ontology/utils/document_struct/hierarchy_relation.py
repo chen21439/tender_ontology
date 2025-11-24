@@ -7,7 +7,6 @@ import os
 from typing import List, Dict, Any, Optional, Tuple
 from pathlib import Path
 from datetime import datetime
-from collections import defaultdict
 
 # 导入 token 计算工具
 try:
@@ -39,12 +38,11 @@ def load_tagged_document(json_path: str) -> List[Dict[str, Any]]:
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
 
-    # 如果是新格式（包含 document_name, items），提取 items
+    # 新格式：包含 document_name, items
     if isinstance(data, dict) and "items" in data:
         return data["items"]
 
-    # 否则假设是旧格式（直接是数组）
-    return data
+    raise ValueError(f"不支持的 JSON 格式，期望包含 'items' 字段")
 
 
 def extract_heading_candidates(
@@ -65,25 +63,18 @@ def extract_heading_candidates(
 
     for line in lines_data:
         text = line.get("text", "").strip()
-
-        # 兼容新旧格式
-        # 新格式：label, id, page_no
-        # 旧格式：class, line_id, page
-        label = line.get("label", line.get("class", ""))
-        item_id = line.get("id", line.get("line_id", ""))
-        page = line.get("page_no", line.get("page", ""))
+        label = line.get("label", "")
+        item_id = line.get("id", "")
+        page = line.get("page_no", "")
 
         if not text:
             continue
 
         # 如果只包含章节，则过滤
-        # 新格式用 section_header，旧格式用 Section
-        if not include_all_lines:
-            if label not in ["section_header", "Section"]:
-                continue
+        if not include_all_lines and label != "section_header":
+            continue
 
-        # 提取特征（这里使用占位值，实际应该从文档中提取）
-        # TODO: 实现真实的特征提取逻辑
+        # 提取特征
         features = extract_line_features(line)
 
         candidate = {
@@ -138,15 +129,15 @@ def extract_line_features(line: Dict[str, Any]) -> Dict[str, Any]:
                 has_numbering = True
                 break
 
-    # 简单的字号推断（基于 class 标签）
-    class_label = line.get("class", "")
-    if class_label == "Section":
+    # 简单的字号推断（基于 label 标签）
+    label = line.get("label", "")
+    if label == "section_header":
         font_size_level = 1  # 中等字号（假设章节标题是中等）
     else:
         font_size_level = 0  # 正文字号
 
     # 简单的加粗推断（假设章节标题通常加粗）
-    is_bold = (class_label == "Section")
+    is_bold = (label == "section_header")
 
     # 简单的居中推断（暂不实现）
     is_centered = False
@@ -266,8 +257,17 @@ def build_document_hierarchy_from_relations(
         if verbose:
             print(f"[HierarchyRelation] 解析得到 {len(predictions)} 个标题预测")
 
-        # 构建层级树
-        hierarchy_tree = construct_hierarchy_tree(predictions, verbose)
+        # 构建候选项映射（包含原始文本和页码信息）
+        candidates_map = {str(c["id"]): c for c in candidates}
+
+        # 使用 TreeConstructor 构建层级树
+        from tender_ontology.utils.document_struct.tree import TreeConstructor
+
+        constructor = TreeConstructor(verbose=verbose)
+        hierarchy_tree = constructor.build_tree_from_predictions(
+            predictions,
+            candidates_map=candidates_map
+        )
 
         # 构建最终结果
         result = {
@@ -286,7 +286,7 @@ def build_document_hierarchy_from_relations(
         raise
 
 
-def _call_text_api(client, prompt: str, temperature: float, verbose: bool) -> str:
+def _call_text_api(client, prompt: str, temperature: float, verbose: bool, max_tokens: int = 4096) -> str:
     """
     调用纯文本 API
 
@@ -295,6 +295,7 @@ def _call_text_api(client, prompt: str, temperature: float, verbose: bool) -> st
         prompt: 提示词
         temperature: 温度参数
         verbose: 是否打印详细信息
+        max_tokens: 最大输出 tokens 数
 
     Returns:
         AI 响应文本
@@ -312,6 +313,7 @@ def _call_text_api(client, prompt: str, temperature: float, verbose: bool) -> st
         prompt=prompt,
         system_prompt="你是一个专业的文档结构分析专家。",
         temperature=temperature,
+        max_tokens=max_tokens,
         verbose=verbose
     )
 
@@ -348,98 +350,20 @@ def _parse_relation_response(response: str, verbose: bool) -> List[Dict[str, Any
     except json.JSONDecodeError as e:
         if verbose:
             print(f"[HierarchyRelation] [JSONDecodeError] {e}")
-            print(f"[HierarchyRelation] 原始响应前500字符: {response[:500]}")
+            print(f"[HierarchyRelation] JSON字符串长度: {len(json_str)}")
+            print(f"[HierarchyRelation] 错误位置附近的内容:")
+            error_pos = e.pos if hasattr(e, 'pos') else 835
+            start = max(0, error_pos - 100)
+            end = min(len(json_str), error_pos + 100)
+            print(f"...{json_str[start:end]}...")
+
+            # 保存完整响应到文件以便调试
+            debug_file = "debug_response.json"
+            with open(debug_file, 'w', encoding='utf-8') as f:
+                f.write(response)
+            print(f"[HierarchyRelation] 完整响应已保存到: {debug_file}")
+
         raise ValueError(f"JSON解析失败: {e}")
-
-
-def construct_hierarchy_tree(
-    predictions: List[Dict[str, Any]],
-    verbose: bool = True
-) -> Dict[str, Any]:
-    """
-    基于预测的关系构建层级树
-
-    Args:
-        predictions: 预测结果列表，每个元素包含 id, parent_id, left_sibling_id
-        verbose: 是否打印详细信息
-
-    Returns:
-        层级树结构
-    """
-    if verbose:
-        print(f"[HierarchyRelation] 开始构建层级树...")
-
-    # 建立 id -> node 的映射
-    nodes_map = {}
-    for pred in predictions:
-        node_id = pred["id"]
-        nodes_map[node_id] = {
-            "id": node_id,
-            "heading_type": pred.get("heading_type", "section"),
-            "parent_id": pred.get("parent_id"),
-            "left_sibling_id": pred.get("left_sibling_id"),
-            "confidence": pred.get("confidence", "medium"),
-            "reasoning": pred.get("reasoning", ""),
-            "children": [],
-            "level": None  # 待计算
-        }
-
-    # 构建父子关系
-    root_nodes = []
-    for node_id, node in nodes_map.items():
-        parent_id = node["parent_id"]
-
-        # 如果 parent_id 指向自己，说明是顶层节点
-        if parent_id == node_id:
-            root_nodes.append(node)
-        else:
-            # 否则添加到父节点的 children
-            if parent_id in nodes_map:
-                nodes_map[parent_id]["children"].append(node)
-            else:
-                if verbose:
-                    print(f"[HierarchyRelation] [WARNING] 节点 {node_id} 的 parent_id={parent_id} 不存在，视为根节点")
-                root_nodes.append(node)
-
-    # 计算每个节点的层级
-    def calculate_level(node: Dict[str, Any], current_level: int = 1):
-        node["level"] = current_level
-        for child in node["children"]:
-            calculate_level(child, current_level + 1)
-
-    for root in root_nodes:
-        calculate_level(root, level=1)
-
-    # 统计层级分布
-    level_distribution = defaultdict(int)
-    for node in nodes_map.values():
-        level = node.get("level", 0)
-        level_distribution[f"level_{level}"] = level_distribution.get(f"level_{level}", 0) + 1
-
-    if verbose:
-        print(f"[HierarchyRelation] 构建完成，共 {len(root_nodes)} 个根节点")
-        print(f"[HierarchyRelation] 层级分布: {dict(level_distribution)}")
-
-    # 构建树结构（序列化为列表）
-    def serialize_tree(node: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "id": node["id"],
-            "heading_type": node["heading_type"],
-            "level": node["level"],
-            "confidence": node["confidence"],
-            "children": [serialize_tree(child) for child in node["children"]]
-        }
-
-    tree_structure = [serialize_tree(root) for root in root_nodes]
-
-    return {
-        "tree": tree_structure,
-        "summary": {
-            "total_headings": len(nodes_map),
-            "root_nodes": len(root_nodes),
-            "level_distribution": dict(level_distribution)
-        }
-    }
 
 
 def process_document_hierarchy_relations(
@@ -471,9 +395,12 @@ def process_document_hierarchy_relations(
     # 初始化客户端
     if client is None:
         from tender_ontology.utils.document_struct.baidu_text_client import BaiduTextClient
-        client = BaiduTextClient()
+        from tender_ontology.config.model_config import DefaultModels
+
+        # 使用 DOCUMENT_HIERARCHY 专用模型（ERNIE-4.0-Turbo-128K）
+        client = BaiduTextClient(model=DefaultModels.DOCUMENT_HIERARCHY)
         if verbose:
-            print("[HierarchyRelation] 使用默认文本客户端")
+            print(f"[HierarchyRelation] 使用文档层级分析专用模型: {DefaultModels.DOCUMENT_HIERARCHY.display_name}")
 
     # 使用默认提示词
     if prompt_template is None:
@@ -547,9 +474,13 @@ def process_document_hierarchy_relations(
 
 
 if __name__ == "__main__":
+    # 切换到项目根目录
+    project_root = Path(r"E:\programFile\AIProgram\tender_ontology")
+    os.chdir(project_root)
+
     # 测试示例
     # 输入文件名前缀，自动查找最新的 labeled.json
-    doc_name = "深圳市大数据服务中心"
+    doc_name = "城市大数据中心物业管理服务"
     artifact_dir = Path("static") / "artifact" / "docling"
 
     # 查找所有匹配的 labeled.json 文件
@@ -587,19 +518,21 @@ if __name__ == "__main__":
     )
     """)
 
-    # 如果文件存在，尝试提取候选项（用于测试）
+    # 调用完整的处理流程
     if os.path.exists(json_path):
-        print(f"\n[测试] 加载文件: {json_path}")
-        lines_data = load_tagged_document(json_path)
-        print(f"[测试] 总行数: {len(lines_data)}")
+        print(f"\n" + "="*80)
+        print(f"开始完整处理流程")
+        print(f"="*80)
 
-        # 提取候选项
-        candidates = extract_heading_candidates(lines_data, include_all_lines=False)
-        print(f"[测试] 候选项数: {len(candidates)}")
+        result = process_document_hierarchy_relations(
+            json_path=json_path,
+            include_all_lines=False,  # 只分析 section_header
+            verbose=True,
+            save_results=True
+        )
 
-        # 显示前3个候选项
-        print(f"[测试] 前3个候选项:")
-        for i, candidate in enumerate(candidates[:3]):
-            print(f"  [{i+1}] ID={candidate['id']}, Text={candidate['text'][:30]}, Features={candidate['features']}")
+        print(f"\n" + "="*80)
+        print(f"处理完成！")
+        print(f"="*80)
     else:
-        print(f"\n[测试] 文件不存在: {json_path}")
+        print(f"\n[错误] 文件不存在: {json_path}")

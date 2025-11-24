@@ -35,46 +35,60 @@ class LabeledJsonConverter:
             docling_json: Docling 完整 JSON 数据
 
         Returns:
-            精简的 labeled JSON 数据
+            精简的 labeled JSON 数据（每个 item 包含多个 bbox）
         """
-        # 构建引用映射
+        # 构建引用映射（用于表格单元格）
         self.ref_map = self._build_ref_map(docling_json)
 
         if self.debug:
             print(f"  [DEBUG] ref_map 总共 {len(self.ref_map)} 个条目")
-            for i, (k, v) in enumerate(list(self.ref_map.items())[:10]):
-                print(f"    {k}: {v[:50] if len(v) > 50 else v}...")
+
+        # 构建父子关系映射（用于判断 text 是否在表格内）
+        parent_map = self._build_parent_map(docling_json)
+
+        if self.debug:
+            print(f"  [DEBUG] parent_map 总共 {len(parent_map)} 个条目")
 
         # 构建文档元素映射（用于排序）
         body_children = docling_json.get("body", {}).get("children", [])
-
-        # 创建索引映射
         element_order = {}
         for idx, child in enumerate(body_children):
             cref = child.get("cref", "")
-            element_order[cref] = idx
+            if cref:
+                element_order[cref] = idx
 
         # 收集所有元素（texts + tables）
         all_elements = []
 
-        # 添加 texts
-        for item in docling_json.get("texts", []):
+        # 统计过滤的表格文本
+        texts_in_table = 0
+
+        # 添加 texts - 保留所有 bbox，但跳过表格内的 text
+        for idx, item in enumerate(docling_json.get("texts", [])):
             self_ref = item.get("self_ref", "")
+
+            # 跳过表格内的文本（当 process_tables=False 时）
+            if not self.process_tables and self._is_in_table(self_ref, parent_map):
+                texts_in_table += 1
+                continue
+
             order_idx = element_order.get(self_ref, 999999)
 
             label = item.get("label", "unknown")
             text = item.get("text", "")
 
-            # 提取 page_no 和 bbox
-            page_no, bbox = self._extract_prov_info(item)
+            # 提取所有 bbox（不只是第一个）
+            bboxes = self._extract_all_bboxes(item)
 
             all_elements.append({
                 "order": order_idx,
                 "label": label,
                 "text": text,
-                "page_no": page_no,
-                "bbox": bbox
+                "bboxes": bboxes  # 现在是列表
             })
+
+        if self.debug and texts_in_table > 0:
+            print(f"  [DEBUG] 过滤掉 {texts_in_table} 个表格内的文本")
 
         # 添加 tables (只在 process_tables=True 时处理)
         if self.process_tables:
@@ -82,8 +96,8 @@ class LabeledJsonConverter:
                 self_ref = table.get("self_ref", "")
                 order_idx = element_order.get(self_ref, 999999)
 
-                # 提取 page_no 和 bbox
-                page_no, bbox = self._extract_prov_info(table)
+                # 提取所有 bbox
+                bboxes = self._extract_all_bboxes(table)
 
                 # 转换表格为 HTML 字符串
                 table_html = self._table_to_html(table.get("data", {}), table_idx)
@@ -92,8 +106,7 @@ class LabeledJsonConverter:
                     "order": order_idx,
                     "label": "table",
                     "text": table_html,
-                    "page_no": page_no,
-                    "bbox": bbox
+                    "bboxes": bboxes
                 })
         elif self.debug:
             table_count = len(docling_json.get("tables", []))
@@ -111,8 +124,7 @@ class LabeledJsonConverter:
                 "id": idx,
                 "label": elem["label"],
                 "text": elem["text"],
-                "page_no": elem["page_no"],
-                "bbox": elem["bbox"]
+                "bboxes": elem["bboxes"]  # 多个 bbox
             })
 
         # 构建最终 JSON
@@ -180,9 +192,47 @@ class LabeledJsonConverter:
 
         return ref_map
 
+    def _extract_all_bboxes(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        从 item 的 prov 字段中提取所有 bbox
+
+        Args:
+            item: 包含 prov 字段的元素
+
+        Returns:
+            bbox 列表，每个 bbox 包含 page, l, t, r, b, coord_origin, charspan
+        """
+        bboxes = []
+        prov_list = item.get("prov", [])
+
+        for p in prov_list:
+            page_no = p.get("page_no")
+            bbox = p.get("bbox")
+            charspan = p.get("charspan")
+
+            if bbox is None:
+                continue
+
+            bbox_data = {
+                "page": page_no,
+                "l": bbox.get("l"),
+                "t": bbox.get("t"),
+                "r": bbox.get("r"),
+                "b": bbox.get("b"),
+                "coord_origin": bbox.get("coord_origin", "BOTTOMLEFT")
+            }
+
+            # 可选：添加 charspan
+            if charspan:
+                bbox_data["charspan"] = charspan
+
+            bboxes.append(bbox_data)
+
+        return bboxes
+
     def _extract_prov_info(self, item: Dict[str, Any]) -> tuple:
         """
-        从 item 的 prov 字段中提取 page_no 和 bbox
+        从 item 的 prov 字段中提取 page_no 和 bbox（兼容旧版本）
 
         Args:
             item: 包含 prov 字段的元素
@@ -266,3 +316,84 @@ class LabeledJsonConverter:
             rows_html.append("<tr>" + "".join(cells_html) + "</tr>")
 
         return "<table>" + "".join(rows_html) + "</table>"
+
+    def _build_parent_map(self, docling_json: Dict[str, Any]) -> Dict[str, str]:
+        """
+        构建子元素到父元素的映射
+
+        Args:
+            docling_json: Docling 完整 JSON 数据
+
+        Returns:
+            子元素 cref -> 父元素 cref 的映射字典
+        """
+        parent_map = {}
+
+        # body.children 的父节点是 body
+        for child in docling_json.get("body", {}).get("children", []):
+            cref = child.get("cref", "")
+            if cref:
+                parent_map[cref] = "#/body"
+
+        # groups 的父子关系
+        for group in docling_json.get("groups", []):
+            self_ref = group.get("self_ref", "")
+            parent = group.get("parent", {})
+            parent_cref = parent.get("cref", "") if parent else ""
+
+            if self_ref and parent_cref:
+                parent_map[self_ref] = parent_cref
+
+            # group 的 children
+            for child in group.get("children", []):
+                child_cref = child.get("cref", "")
+                if child_cref and self_ref:
+                    parent_map[child_cref] = self_ref
+
+        # tables 的父子关系
+        for table in docling_json.get("tables", []):
+            self_ref = table.get("self_ref", "")
+            parent = table.get("parent", {})
+            parent_cref = parent.get("cref", "") if parent else ""
+
+            if self_ref and parent_cref:
+                parent_map[self_ref] = parent_cref
+
+            # table 的 children
+            for child in table.get("children", []):
+                child_cref = child.get("cref", "")
+                if child_cref and self_ref:
+                    parent_map[child_cref] = self_ref
+
+        return parent_map
+
+    def _is_in_table(self, cref: str, parent_map: Dict[str, str]) -> bool:
+        """
+        判断一个元素是否在表格内（通过祖先链判断）
+
+        Args:
+            cref: 元素的 cref
+            parent_map: 父子关系映射
+
+        Returns:
+            True 如果元素在表格内，False 否则
+        """
+        current = cref
+        visited = set()
+
+        # 沿着父节点链向上查找
+        while current in parent_map:
+            parent = parent_map[current]
+
+            # 防止循环引用
+            if parent in visited:
+                break
+
+            # 如果祖先是 table，说明当前元素在表格内
+            if parent.startswith("#/tables/"):
+                return True
+
+            visited.add(parent)
+            current = parent
+
+        return False
