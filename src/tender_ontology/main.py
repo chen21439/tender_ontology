@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from tender_ontology.routers import health, ontology
+from tender_ontology.routers import health, ontology, pdf_upload
 
 app = FastAPI(
     title="Tender Ontology API",
@@ -28,6 +28,7 @@ app.add_middleware(
 # Include routers
 app.include_router(health.router, tags=["health"])
 app.include_router(ontology.router, tags=["ontology"])
+app.include_router(pdf_upload.router, prefix="/api/pdf", tags=["PDF上传"])
 
 # Mount static files
 # Get project root (tender_ontology directory where pyproject.toml is located)
