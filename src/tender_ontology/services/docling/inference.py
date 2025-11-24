@@ -13,7 +13,7 @@ from typing import Dict, Any, Optional, Union
 
 from tender_ontology.config.docling_settings import docling_settings
 from .converter import LabeledJsonConverter
-from .artifact_converter import SectionHeaderConverter
+from .artifact_converter import SectionHeaderConverter, MarkdownJsonConverter
 
 
 class DoclingInferenceService:
@@ -62,7 +62,8 @@ class DoclingInferenceService:
         save_json: bool = True,
         save_labeled: bool = True,
         save_doctags: bool = False,
-        save_headers: bool = True
+        save_headers: bool = True,
+        save_markdown_json: bool = True
     ) -> Dict[str, Any]:
         """
         对文档进行推理
@@ -74,6 +75,7 @@ class DoclingInferenceService:
             save_labeled: 是否保存 labeled JSON
             save_doctags: 是否保存 doctags
             save_headers: 是否保存 section headers JSON
+            save_markdown_json: 是否保存 markdown JSON (段落+标题)
 
         Returns:
             包含推理结果和文件路径的字典
@@ -182,7 +184,7 @@ class DoclingInferenceService:
 
         # 2. 完整 JSON
         json_data = None
-        if save_json or save_labeled or save_headers:
+        if save_json or save_labeled or save_headers or save_markdown_json:
             json_path = self.output_dir / f"{doc_name}_{timestamp}.json"
 
             if hasattr(doc, 'export_to_json'):
@@ -234,6 +236,14 @@ class DoclingInferenceService:
             header_converter.convert_and_save(json_data, headers_path)
             results["headers_path"] = str(headers_path)
             print(f"  ✅ Headers JSON 已保存: {headers_path.name}")
+
+        # 6. Markdown JSON (段落 + 标题)
+        if save_markdown_json and json_data:
+            markdown_json_path = self.output_dir / f"{doc_name}_{timestamp}_markdown.json"
+            markdown_converter = MarkdownJsonConverter(debug=False)
+            markdown_converter.convert_and_save(json_data, markdown_json_path)
+            results["markdown_json_path"] = str(markdown_json_path)
+            print(f"  ✅ Markdown JSON 已保存: {markdown_json_path.name}")
 
         save_time = time.time() - save_start_time
         total_time = time.time() - total_start_time
