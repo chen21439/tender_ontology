@@ -78,20 +78,15 @@ class DoclingBackgroundTask:
                     qwen_headings = self._extract_headings_with_qwen(results["markdown_path"])
                     print(f"[Docling Task] 千问标题提取完成，共 {len(qwen_headings)} 个标题")
 
-                    # 保存千问标题到 JSON 文件
+                    # 保存千问标题到 JSON 文件（直接保存数组）
                     markdown_path = Path(results["markdown_path"])
-                    qwen_headings_path = markdown_path.parent / f"{markdown_path.stem}_qwen_headings.json"
-                    qwen_headings_data = {
-                        "total_headings": len(qwen_headings),
-                        "headings": qwen_headings
-                    }
-                    qwen_headings_path.write_text(json.dumps(qwen_headings_data, ensure_ascii=False, indent=2), encoding='utf-8')
-                    print(f"[Docling Task] 千问标题已保存: {qwen_headings_path.name}")
+                    model_json_path = markdown_path.parent / f"{markdown_path.stem}_model.json"
+                    model_json_path.write_text(json.dumps(qwen_headings, ensure_ascii=False, indent=2), encoding='utf-8')
+                    print(f"[Docling Task] 模型标题已保存: {model_json_path.name}")
 
-                    artifacts["qwen_headings"] = {
-                        "path": str(qwen_headings_path),
-                        "total_headings": len(qwen_headings),
-                        "headings": qwen_headings
+                    artifacts["model"] = {
+                        "path": str(model_json_path),
+                        "total_headings": len(qwen_headings)
                     }
                 except Exception as e:
                     print(f"[Docling Task] 千问标题提取失败: {e}")
@@ -216,17 +211,11 @@ class DoclingBackgroundTask:
         import re
 
         # 提示词
-        prompt = """你是一个专业的文档结构分析引擎，专门用于修复 Markdown 文档中不规范的标题层级。
-
-## 快速定位策略
-1.跳过非关键信息以定位核心
-2.多线索并发联想以预判需求
-
+        prompt = """你是一个专业的文档结构分析引擎，**仅**专注于修复原文中所有不规范的标题标记（如误用 | 或 --- 的地方）。
 
 ## 输出要求
-- 仅返回标准 Markdown 格式的标题列表。
-- 输出必须以 ```markdown 代码块开始，以 ``` 结束。
-- 代码块内只包含标题，无其他任何文字或说明。
+- 仅在```markdown```中返回修正并层级化后的标题结构，不包含任何段落、表格或说明。
+- 标题层级使用# ## ### 在markdown中显示。
 
 示例输出格式：
 ```markdown
@@ -240,7 +229,7 @@ class DoclingBackgroundTask:
 
         # 创建千问客户端
         api_key = "sk-f67e1a1d436c4df19ac575d8483e247d"
-        client = QwenClient(api_key=api_key, model="qwen-long")
+        client = QwenClient(api_key=api_key, model="qwen-long-latest")
 
         # 构建消息（fileid 放在 system，任务放在 user）
         system_prompt = f"fileid://{file_id}"
@@ -251,7 +240,7 @@ class DoclingBackgroundTask:
         response = client.send_request(
             prompt=prompt,
             system_prompt=system_prompt,
-            temperature=0.1,
+            temperature=0.0,
             verbose=True
         )
 
@@ -374,7 +363,7 @@ class DoclingBackgroundTask:
                         print(f"[Docling Task] Artifacts generated:")
                         print(f"  - Headers: {artifacts.get('headers', {}).get('total_headers', 0)} items")
                         print(f"  - Labeled: {artifacts.get('labeled', {}).get('total_items', 0)} items")
-                        print(f"  - Qwen Headings: {artifacts.get('qwen_headings', {}).get('total_headings', 0)} items")
+                        print(f"  - Model Headings: {artifacts.get('model', {}).get('total_headings', 0)} items")
                         print(f"  - Files: {artifacts.get('headers', {}).get('path')}")
                         # 如果需要存储 artifacts，可以考虑添加新的 TEXT/JSON 字段
 
