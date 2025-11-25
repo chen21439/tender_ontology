@@ -27,7 +27,7 @@ class DoclingSettings(BaseSettings):
     # 模式配置
     offline_mode: bool = True  # 离线模式
     disable_table_recognition: bool = False  # 表格识别开关
-    hierarchy_refinement: bool = True  # 层级修正插件（已启用）⬅️ 改这里
+    hierarchy_refinement: bool = False  # 层级修正插件（已关闭）⬅️ 改这里
     hierarchy_raise_on_error: bool = False  # 出错时是否抛出异常
 
     # 输出路径（相对于项目根目录）
