@@ -47,7 +47,8 @@ def load_tagged_document(json_path: str) -> List[Dict[str, Any]]:
 
 def extract_heading_candidates(
     lines_data: List[Dict[str, Any]],
-    include_all_lines: bool = False
+    include_all_lines: bool = False,
+    level_threshold: int = 101
 ) -> List[Dict[str, Any]]:
     """
     提取标题候选项（纯文本版本）
@@ -55,6 +56,7 @@ def extract_heading_candidates(
     Args:
         lines_data: 行数据列表
         include_all_lines: 是否包含所有行（如果为 False，只包含标签为 section_header 的行）
+        level_threshold: 过滤掉 level >= threshold 的数据（默认 101，即只保留 level < 101 的高置信度标题）
 
     Returns:
         标题候选列表（只包含 id, text, page，不包含版面特征）
@@ -66,12 +68,17 @@ def extract_heading_candidates(
         label = line.get("label", "")
         item_id = line.get("id", "")
         page = line.get("page_no", "")
+        level = line.get("level", 0)  # 获取 level 字段
 
         if not text:
             continue
 
         # 如果只包含章节，则过滤
         if not include_all_lines and label != "section_header":
+            continue
+
+        # 过滤掉 level >= threshold 的低置信度数据
+        if level >= level_threshold:
             continue
 
         # 纯文本版本：只保留 id, text, page（不包含版面特征）
@@ -175,7 +182,8 @@ def build_document_hierarchy_from_relations(
     prompt_template: str,
     include_all_lines: bool = False,
     temperature: float = 0.000001,
-    verbose: bool = True
+    verbose: bool = True,
+    use_simple_prompt: bool = False
 ) -> Dict[str, Any]:
     """
     基于关系预测构建文档层级目录结构
@@ -183,10 +191,11 @@ def build_document_hierarchy_from_relations(
     Args:
         client: BaiduTextClient 实例
         lines_data: 文档行数据列表
-        prompt_template: 提示词模板
+        prompt_template: 提示词模板（或 "SIMPLE" 占位符）
         include_all_lines: 是否包含所有行进行分析
         temperature: 温度参数
         verbose: 是否打印详细信息
+        use_simple_prompt: 是否使用简化版提示词
 
     Returns:
         层级目录结构
@@ -201,7 +210,44 @@ def build_document_hierarchy_from_relations(
     if verbose:
         print(f"[HierarchyRelation] 提取标题候选数: {len(candidates)}")
 
-    # 构建候选列表 JSON
+    # 如果使用简化版提示词，需要特殊处理
+    if use_simple_prompt or prompt_template == "SIMPLE":
+        from tender_ontology.prompts.document_struct.document_structure_simple_prompt import get_simple_structure_prompt
+        system_prompt, user_prompt = get_simple_structure_prompt(candidates)
+
+        if verbose:
+            print(f"[HierarchyRelation] 使用简化版提示词（system + user 两段式）")
+
+        # 直接调用 API
+        response = _call_text_api(
+            client,
+            user_prompt,
+            temperature,
+            verbose,
+            system_prompt=system_prompt
+        )
+
+        if verbose:
+            print(f"[HierarchyRelation] 收到响应")
+
+        # 解析响应（简化版输出格式不同，暂时用相同解析）
+        predictions = _parse_relation_response(response, verbose)
+
+        if verbose:
+            print(f"[HierarchyRelation] 解析得到 {len(predictions)} 个标题预测")
+
+        # 构建结果（简化版不构建树，直接返回）
+        result = {
+            "method": "simple_structure",
+            "candidates_count": len(candidates),
+            "headings_count": len(predictions),
+            "predictions": predictions,
+            "hierarchy": None  # 简化版不构建树
+        }
+
+        return result
+
+    # 原有逻辑：构建候选列表 JSON
     candidates_json = build_candidates_json(candidates)
 
     # Token 统计
@@ -212,13 +258,13 @@ def build_document_hierarchy_from_relations(
         prompt_tokens = token_counter.count_tokens(prompt_template)
 
         print(f"\n{'='*80}")
-        print(f"📊 Token 统计信息")
+        print(f"Token 统计信息")
         print(f"{'='*80}")
-        print(f"📄 候选项统计:")
+        print(f"候选项统计:")
         print(f"   - 候选项数量: {len(candidates)}")
         print(f"   - 候选项 JSON 长度: {len(candidates_json):,} 字符")
         print(f"   - 候选项 JSON tokens: ~{candidates_tokens:,} tokens")
-        print(f"\n📤 本次发送内容:")
+        print(f"\n本次发送内容:")
         print(f"   - 提示词模板 tokens: ~{prompt_tokens:,} tokens")
         print(f"{'='*80}\n")
     elif verbose:
@@ -283,7 +329,7 @@ def build_document_hierarchy_from_relations(
         raise
 
 
-def _call_text_api(client, prompt: str, temperature: float, verbose: bool, max_tokens: Optional[int] = None) -> str:
+def _call_text_api(client, prompt: str, temperature: float, verbose: bool, max_tokens: Optional[int] = None, system_prompt: str = None) -> str:
     """
     调用纯文本 API
 
@@ -293,6 +339,7 @@ def _call_text_api(client, prompt: str, temperature: float, verbose: bool, max_t
         temperature: 温度参数
         verbose: 是否打印详细信息
         max_tokens: 最大输出 tokens 数（None 表示不限制，由模型自动决定）
+        system_prompt: 系统提示词（如果为 None 则使用默认）
 
     Returns:
         AI 响应文本
@@ -305,10 +352,14 @@ def _call_text_api(client, prompt: str, temperature: float, verbose: bool, max_t
             print("[HierarchyRelation] 创建文本客户端...")
         client = BaiduTextClient()
 
+    # 使用传入的 system_prompt 或默认值
+    if system_prompt is None:
+        system_prompt = "你是一个专业的文档结构分析专家。"
+
     # 调用文本 API
     response = client.send_request(
         prompt=prompt,
-        system_prompt="你是一个专业的文档结构分析专家。",
+        system_prompt=system_prompt,
         temperature=temperature,
         max_tokens=max_tokens,
         verbose=verbose
@@ -328,6 +379,8 @@ def _parse_relation_response(response: str, verbose: bool) -> List[Dict[str, Any
     Returns:
         预测结果列表
     """
+    import re
+
     # 解析 JSON 响应
     if "```json" in response:
         json_str = response.split("```json")[1].split("```")[0].strip()
@@ -338,6 +391,31 @@ def _parse_relation_response(response: str, verbose: bool) -> List[Dict[str, Any
         json_str = response[start:end]
     else:
         json_str = response.strip()
+
+    # 清理常见的模型输出问题
+    # 1. 删除省略标记: { ... }、......、其他行以此类推等
+    abbreviation_patterns = [
+        r'\{\s*\.\.\.\s*\}[^}]*',  # { ... } 及其后续内容
+        r'\.{3,}[^}]*',  # ...... 及其后续内容
+        r'其他行以此类推[^}]*',  # "其他行以此类推" 及其后续内容
+        r'省略[^}]*',  # "省略" 及其后续内容
+    ]
+
+    for pattern in abbreviation_patterns:
+        if re.search(pattern, json_str):
+            if verbose:
+                print(f"[HierarchyRelation] 检测到省略标记，尝试修复...")
+            # 找到省略标记的位置，截断到最后一个完整的对象
+            match = re.search(pattern, json_str)
+            if match:
+                # 回溯找到最后一个完整的 }
+                truncate_pos = match.start()
+                last_brace = json_str.rfind("}", 0, truncate_pos)
+                if last_brace > 0:
+                    json_str = json_str[:last_brace + 1] + "\n]"
+                    if verbose:
+                        print(f"[HierarchyRelation] 已截断到位置 {last_brace}，修复后的 JSON 长度: {len(json_str)}")
+                break
 
     try:
         predictions = json.loads(json_str)
@@ -371,7 +449,9 @@ def process_document_hierarchy_relations(
     temperature: float = 0.000001,
     verbose: bool = True,
     save_results: bool = True,
-    output_dir: str = None
+    output_dir: str = None,
+    model: str = None,
+    use_simple_prompt: bool = False
 ) -> Dict[str, Any]:
     """
     处理文档层级目录构建（关系预测方法，完整 Pipeline）
@@ -385,6 +465,8 @@ def process_document_hierarchy_relations(
         verbose: 是否打印详细信息
         save_results: 是否保存结果
         output_dir: 输出目录，如果为 None 则保存到 JSON 文件同目录
+        model: 模型名称（如 "ernie-speed-8k"），如果为 None 则使用默认
+        use_simple_prompt: 是否使用简化版提示词（快速结构化）
 
     Returns:
         层级目录结构
@@ -392,17 +474,36 @@ def process_document_hierarchy_relations(
     # 初始化客户端
     if client is None:
         from tender_ontology.utils.document_struct.baidu_text_client import BaiduTextClient
-        from tender_ontology.config.model_config import DefaultModels
+        from tender_ontology.config.model_config import DefaultModels, BaiduModel
 
-        # 使用 DOCUMENT_HIERARCHY 专用模型（ERNIE-4.0-Turbo-128K）
-        client = BaiduTextClient(model=DefaultModels.DOCUMENT_HIERARCHY)
-        if verbose:
-            print(f"[HierarchyRelation] 使用文档层级分析专用模型: {DefaultModels.DOCUMENT_HIERARCHY.display_name}")
+        # 选择模型
+        if model:
+            # 使用指定模型
+            selected_model = model
+            if verbose:
+                print(f"[HierarchyRelation] 使用指定模型: {model}")
+        else:
+            # 使用默认模型
+            selected_model = DefaultModels.DOCUMENT_HIERARCHY
+            if verbose:
+                print(f"[HierarchyRelation] 使用文档层级分析专用模型: {DefaultModels.DOCUMENT_HIERARCHY.display_name}")
 
-    # 使用默认提示词
+        client = BaiduTextClient(model=selected_model)
+
+    # 选择提示词
     if prompt_template is None:
-        from tender_ontology.prompts.document_struct.document_relation_prediction_prompt import get_relation_prediction_prompt
-        prompt_template = get_relation_prediction_prompt()
+        if use_simple_prompt:
+            # 使用简化版提示词（快速结构化）
+            if verbose:
+                print(f"[HierarchyRelation] 使用简化版提示词")
+            # 简化版提示词将在后面处理（需要 candidates 数据）
+            prompt_template = "SIMPLE"  # 占位符
+        else:
+            # 使用完整版提示词（关系预测）
+            from tender_ontology.prompts.document_struct.document_relation_prediction_prompt import get_relation_prediction_prompt
+            prompt_template = get_relation_prediction_prompt()
+            if verbose:
+                print(f"[HierarchyRelation] 使用完整版提示词（域划分版）")
 
     if verbose:
         print(f"[HierarchyRelation] ========== 文档层级目录构建（关系预测） ==========")
@@ -426,7 +527,8 @@ def process_document_hierarchy_relations(
             prompt_template=prompt_template,
             include_all_lines=include_all_lines,
             temperature=temperature,
-            verbose=verbose
+            verbose=verbose,
+            use_simple_prompt=use_simple_prompt
         )
 
         # 添加元数据
@@ -457,10 +559,15 @@ def process_document_hierarchy_relations(
 
         if verbose:
             print(f"[HierarchyRelation] ========== 处理完成 ==========")
-            summary = hierarchy_result["hierarchy"]["summary"]
-            print(f"[HierarchyRelation] 总标题数: {summary.get('total_headings', 0)}")
-            print(f"[HierarchyRelation] 根节点数: {summary.get('root_nodes', 0)}")
-            print(f"[HierarchyRelation] 层级分布: {summary.get('level_distribution', {})}")
+            # 简化版提示词不构建树，只输出标题数
+            if hierarchy_result["hierarchy"] is None:
+                print(f"[HierarchyRelation] 标题数: {hierarchy_result.get('headings_count', 0)}")
+                print(f"[HierarchyRelation] 候选项数: {hierarchy_result.get('candidates_count', 0)}")
+            else:
+                summary = hierarchy_result["hierarchy"]["summary"]
+                print(f"[HierarchyRelation] 总标题数: {summary.get('total_headings', 0)}")
+                print(f"[HierarchyRelation] 根节点数: {summary.get('root_nodes', 0)}")
+                print(f"[HierarchyRelation] 层级分布: {summary.get('level_distribution', {})}")
 
         return result
 
@@ -518,14 +625,16 @@ if __name__ == "__main__":
     # 调用完整的处理流程
     if os.path.exists(json_path):
         print(f"\n" + "="*80)
-        print(f"开始完整处理流程")
+        print(f"开始完整处理流程（测试完整版提示词 + ERNIE-Speed-128K）")
         print(f"="*80)
 
         result = process_document_hierarchy_relations(
             json_path=json_path,
             include_all_lines=False,  # 只分析 section_header
             verbose=True,
-            save_results=True
+            save_results=True,
+            model="ernie-speed-128k",  # 使用快速模型（128K上下文）
+            use_simple_prompt=False   # 使用完整版提示词（关系预测）
         )
 
         print(f"\n" + "="*80)

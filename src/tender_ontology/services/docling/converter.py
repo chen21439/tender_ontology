@@ -8,24 +8,46 @@ LabeledJsonConverter - 将 Docling JSON 转换为精简的 labeled 格式
 """
 
 import json
+import re
 from typing import Dict, List, Any, Optional
 from pathlib import Path
+from .artifact_converter import BaseConverter
 
 
-class LabeledJsonConverter:
+class LabeledJsonConverter(BaseConverter):
     """将 Docling 完整 JSON 转换为精简的 labeled JSON"""
 
-    def __init__(self, debug: bool = False, process_tables: bool = True):
+    # 零宽字符正则表达式：匹配常见的零宽字符
+    ZERO_WIDTH_CHARS = re.compile(
+        r'[\u200B\u200C\u200D\uFEFF\u00AD]'  # ZWSP, ZWNJ, ZWJ, BOM, Soft Hyphen
+    )
+
+    def __init__(self, debug: bool = False, process_tables: bool = True, sort_by_page: bool = False):
         """
         初始化转换器
 
         Args:
             debug: 是否启用调试输出
             process_tables: 是否处理表格 (False 时跳过表格转换，节省时间)
+            sort_by_page: 是否按页码+位置排序 (False 时按 Docling 文档顺序排序)
         """
-        self.debug = debug
+        super().__init__(debug=debug)
         self.process_tables = process_tables
+        self.sort_by_page = sort_by_page
         self.ref_map = {}
+
+    @staticmethod
+    def remove_zero_width_chars(text: str) -> str:
+        """
+        移除字符串中的零宽字符
+
+        Args:
+            text: 输入文本
+
+        Returns:
+            清理后的文本
+        """
+        return LabeledJsonConverter.ZERO_WIDTH_CHARS.sub('', text)
 
     def convert(self, docling_json: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -50,12 +72,9 @@ class LabeledJsonConverter:
             print(f"  [DEBUG] parent_map 总共 {len(parent_map)} 个条目")
 
         # 构建文档元素映射（用于排序）
-        body_children = docling_json.get("body", {}).get("children", [])
+        # 递归遍历 body 树，按照阅读顺序（children 的顺序）给每个元素分配序号
         element_order = {}
-        for idx, child in enumerate(body_children):
-            cref = child.get("cref", "")
-            if cref:
-                element_order[cref] = idx
+        self._build_reading_order(docling_json, element_order)
 
         # 收集所有元素（texts + tables）
         all_elements = []
@@ -67,25 +86,37 @@ class LabeledJsonConverter:
         for idx, item in enumerate(docling_json.get("texts", [])):
             self_ref = item.get("self_ref", "")
 
-            # 跳过表格内的文本（当 process_tables=False 时）
-            if not self.process_tables and self._is_in_table(self_ref, parent_map):
+            # 始终跳过表格内的文本（表格内容不应该作为独立文本输出）
+            if self._is_in_table(self_ref, parent_map):
                 texts_in_table += 1
                 continue
 
             order_idx = element_order.get(self_ref, 999999)
 
             label = item.get("label", "unknown")
-            text = item.get("text", "")
+            text = self.remove_zero_width_chars(item.get("text", ""))
 
             # 提取所有 bbox（不只是第一个）
             bboxes = self._extract_all_bboxes(item)
 
-            all_elements.append({
+            # 获取第一个 bbox 的页码和位置（用于页码排序）
+            first_page = bboxes[0]["page"] if bboxes else 9999
+            first_top = bboxes[0]["t"] if bboxes else 9999
+
+            element_data = {
                 "order": order_idx,
+                "page": first_page,
+                "top": first_top,
                 "label": label,
                 "text": text,
-                "bboxes": bboxes  # 现在是列表
-            })
+                "bboxes": bboxes
+            }
+
+            # 如果是 section_header，添加 level 字段（如果存在）
+            if label == "section_header" and "level" in item:
+                element_data["level"] = item["level"]
+
+            all_elements.append(element_data)
 
         if self.debug and texts_in_table > 0:
             print(f"  [DEBUG] 过滤掉 {texts_in_table} 个表格内的文本")
@@ -99,11 +130,17 @@ class LabeledJsonConverter:
                 # 提取所有 bbox
                 bboxes = self._extract_all_bboxes(table)
 
+                # 获取第一个 bbox 的页码和位置（用于页码排序）
+                first_page = bboxes[0]["page"] if bboxes else 9999
+                first_top = bboxes[0]["t"] if bboxes else 9999
+
                 # 转换表格为 HTML 字符串
                 table_html = self._table_to_html(table.get("data", {}), table_idx)
 
                 all_elements.append({
                     "order": order_idx,
+                    "page": first_page,
+                    "top": first_top,
                     "label": "table",
                     "text": table_html,
                     "bboxes": bboxes
@@ -120,12 +157,18 @@ class LabeledJsonConverter:
         labeled_items = []
         for idx, elem in enumerate(all_elements):
             elem.pop("order", None)
-            labeled_items.append({
+            item_data = {
                 "id": idx,
                 "label": elem["label"],
                 "text": elem["text"],
-                "bboxes": elem["bboxes"]  # 多个 bbox
-            })
+                "bboxes": elem["bboxes"]
+            }
+
+            # 保留 level 字段（如果存在）
+            if "level" in elem:
+                item_data["level"] = elem["level"]
+
+            labeled_items.append(item_data)
 
         # 构建最终 JSON
         return {
@@ -316,84 +359,3 @@ class LabeledJsonConverter:
             rows_html.append("<tr>" + "".join(cells_html) + "</tr>")
 
         return "<table>" + "".join(rows_html) + "</table>"
-
-    def _build_parent_map(self, docling_json: Dict[str, Any]) -> Dict[str, str]:
-        """
-        构建子元素到父元素的映射
-
-        Args:
-            docling_json: Docling 完整 JSON 数据
-
-        Returns:
-            子元素 cref -> 父元素 cref 的映射字典
-        """
-        parent_map = {}
-
-        # body.children 的父节点是 body
-        for child in docling_json.get("body", {}).get("children", []):
-            cref = child.get("cref", "")
-            if cref:
-                parent_map[cref] = "#/body"
-
-        # groups 的父子关系
-        for group in docling_json.get("groups", []):
-            self_ref = group.get("self_ref", "")
-            parent = group.get("parent", {})
-            parent_cref = parent.get("cref", "") if parent else ""
-
-            if self_ref and parent_cref:
-                parent_map[self_ref] = parent_cref
-
-            # group 的 children
-            for child in group.get("children", []):
-                child_cref = child.get("cref", "")
-                if child_cref and self_ref:
-                    parent_map[child_cref] = self_ref
-
-        # tables 的父子关系
-        for table in docling_json.get("tables", []):
-            self_ref = table.get("self_ref", "")
-            parent = table.get("parent", {})
-            parent_cref = parent.get("cref", "") if parent else ""
-
-            if self_ref and parent_cref:
-                parent_map[self_ref] = parent_cref
-
-            # table 的 children
-            for child in table.get("children", []):
-                child_cref = child.get("cref", "")
-                if child_cref and self_ref:
-                    parent_map[child_cref] = self_ref
-
-        return parent_map
-
-    def _is_in_table(self, cref: str, parent_map: Dict[str, str]) -> bool:
-        """
-        判断一个元素是否在表格内（通过祖先链判断）
-
-        Args:
-            cref: 元素的 cref
-            parent_map: 父子关系映射
-
-        Returns:
-            True 如果元素在表格内，False 否则
-        """
-        current = cref
-        visited = set()
-
-        # 沿着父节点链向上查找
-        while current in parent_map:
-            parent = parent_map[current]
-
-            # 防止循环引用
-            if parent in visited:
-                break
-
-            # 如果祖先是 table，说明当前元素在表格内
-            if parent.startswith("#/tables/"):
-                return True
-
-            visited.add(parent)
-            current = parent
-
-        return False

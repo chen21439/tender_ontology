@@ -11,6 +11,8 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional, Union
 
+from docling.datamodel.pipeline_options import TableFormerMode
+
 from tender_ontology.config.docling_settings import docling_settings
 from .converter import LabeledJsonConverter
 from .artifact_converter import SectionHeaderConverter, MarkdownJsonConverter
@@ -45,6 +47,7 @@ class DoclingInferenceService:
         self.hierarchy_refinement = (
             hierarchy_refinement
             if hierarchy_refinement is not None
+
             else docling_settings.hierarchy_refinement
         )
 
@@ -119,11 +122,15 @@ class DoclingInferenceService:
         if is_pdf:
             opts = PdfPipelineOptions(
                 do_ocr=False,
-                do_table_structure=not self.disable_table_recognition,
+                do_table_structure=True,
                 generate_page_images=False,
                 generate_picture_images=False,
-                generate_table_images=False
+                generate_table_images=False,
             )
+
+            # 这里是“修改对象属性”，不能写在括号里
+            opts.table_structure_options.do_cell_matching = False
+            opts.table_structure_options.mode = TableFormerMode.FAST
             converter = DocumentConverter(
                 allowed_formats=[InputFormat.PDF],
                 format_options={
@@ -147,23 +154,31 @@ class DoclingInferenceService:
         print(f"      ✅ 文档推理完成，耗时: {convert_time:.2f} 秒")
 
         # 层级修正（可选）
+        hierarchy_time = 0.0
         if self.hierarchy_refinement and is_pdf:
-            print("      🔁 正在进行标题层级修正...")
+            print("[3/4] 正在进行标题层级修正...")
+            hierarchy_start_time = time.time()
             try:
-                from hierarchical.postprocessor import ResultPostprocessor
-                ResultPostprocessor(result, source=str(file_path)).process()
-                print("      ✅ 标题层级修正完成")
-            except ImportError:
-                print("      ⚠️  docling-hierarchical-pdf 未安装，跳过层级修正")
+                from tender_ontology.utils.document_struct.docling_post_process import HierarchyProcessor
+
+                processor = HierarchyProcessor(
+                    raise_on_error=False,
+                    debug=False
+                )
+
+                # 直接调用，不检查 is_available（验证阶段）
+                processor.process(result, source=str(file_path))
+                hierarchy_time = time.time() - hierarchy_start_time
+                print(f"      ✅ 标题层级修正完成，耗时: {hierarchy_time:.2f} 秒")
+
+            except ImportError as e:
+                print(f"      ⚠️  导入失败: {e}")
             except Exception as e:
                 print(f"      ⚠️  层级修正失败: {e}")
 
         doc = result.document
 
         # 保存结果
-        print("[3/4] 层级修正...")
-        print("      ⏭️  跳过（未启用）")
-
         print("[4/4] 保存结果...")
         save_start_time = time.time()
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -251,6 +266,7 @@ class DoclingInferenceService:
         # 统计结果
         results.update({
             "init_time": init_time,
+            "hierarchy_time": hierarchy_time,
             "save_time": save_time,
             "total_time": total_time
         })
@@ -260,7 +276,9 @@ class DoclingInferenceService:
         print(f"{'='*80}")
         print(f"  [1] 模型加载:     {init_time:.2f} 秒 ({init_time/total_time*100:.1f}%)")
         print(f"  [2] 文档推理:     {convert_time:.2f} 秒 ({convert_time/total_time*100:.1f}%)")
-        print(f"  [3] 文件保存:     {save_time:.2f} 秒 ({save_time/total_time*100:.1f}%)")
+        if hierarchy_time > 0:
+            print(f"  [3] 层级修正:     {hierarchy_time:.2f} 秒 ({hierarchy_time/total_time*100:.1f}%)")
+        print(f"  [4] 文件保存:     {save_time:.2f} 秒 ({save_time/total_time*100:.1f}%)")
         print(f"  {'─'*76}")
         print(f"  ✅ 总计:          {total_time:.2f} 秒")
         print(f"{'='*80}\n")
