@@ -404,3 +404,24 @@ def get_background_task_handler() -> DoclingBackgroundTask:
     if _background_task_handler is None:
         _background_task_handler = DoclingBackgroundTask()
     return _background_task_handler
+
+
+if __name__ == "__main__":
+    # 直接测试千问标题提取
+    handler = get_background_task_handler()
+
+    # 使用默认 file_id 或者传入你自己的
+    file_id = "file-fe-b75e560d00cc48bfa37e36ca"
+
+    print(f"开始提取标题，使用 file_id: {file_id}\n")
+
+    headings = handler.extract_headings_by_file_id(file_id)
+
+    print(f"\n{'='*80}")
+    print(f"提取完成！共 {len(headings)} 个标题")
+    print(f"{'='*80}\n")
+
+    # 打印所有标题（Markdown 格式）
+    for h in headings:
+        prefix = "#" * h["level"]
+        print(f"{prefix} {h['text']}")
