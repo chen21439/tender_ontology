@@ -70,17 +70,37 @@ class DoclingBackgroundTask:
             # 3. 读取生成的文件内容
             artifacts = self._collect_artifacts(results)
 
-            # 3.5 调用千问提取层级标题
+            # 3.5 调用千问提取层级标题（使用带 ID 的 markdown 文件）
             qwen_headings = None
-            if "markdown_path" in results:
+            if "title_md_path" in results and "fulltext_path" in results:
                 try:
                     print(f"[Docling Task] 开始千问标题提取...")
-                    qwen_headings = self._extract_headings_with_qwen(results["markdown_path"])
+                    qwen_headings = self._extract_headings_with_qwen(results["title_md_path"])
                     print(f"[Docling Task] 千问标题提取完成，共 {len(qwen_headings)} 个标题")
 
+                    # 从 fulltext.json 读取 id -> page/bboxes 映射
+                    fulltext_path = Path(results["fulltext_path"])
+                    fulltext_data = json.loads(fulltext_path.read_text(encoding='utf-8'))
+
+                    # 构建 id 到元素的映射
+                    id_to_element = {item["id"]: item for item in fulltext_data if "id" in item}
+                    print(f"[Docling Task] 从 fulltext.json 构建了 {len(id_to_element)} 个 ID 映射")
+
+                    # 填充 page 和 bboxes 信息
+                    matched_count = 0
+                    for heading in qwen_headings:
+                        node_id = heading.get("id")
+                        if node_id and node_id in id_to_element:
+                            element = id_to_element[node_id]
+                            heading["page"] = element.get("page")
+                            heading["bboxes"] = element.get("bboxes", [])
+                            matched_count += 1
+
+                    print(f"[Docling Task] 成功匹配 {matched_count}/{len(qwen_headings)} 个标题的位置信息")
+
                     # 保存千问标题到 JSON 文件（直接保存数组）
-                    markdown_path = Path(results["markdown_path"])
-                    model_json_path = markdown_path.parent / f"{markdown_path.stem}_model.json"
+                    title_md_path = Path(results["title_md_path"])
+                    model_json_path = title_md_path.parent / f"{title_md_path.stem.replace('_title_with_id', '')}_model.json"
                     model_json_path.write_text(json.dumps(qwen_headings, ensure_ascii=False, indent=2), encoding='utf-8')
                     print(f"[Docling Task] 模型标题已保存: {model_json_path.name}")
 
@@ -88,6 +108,25 @@ class DoclingBackgroundTask:
                         "path": str(model_json_path),
                         "total_headings": len(qwen_headings)
                     }
+
+                    # 4. 使用 LevelTreeConstructor 构建完整文档树
+                    print(f"[Docling Task] 开始构建文档层级树...")
+                    tree_result = self._build_document_tree(qwen_headings, fulltext_data)
+
+                    if tree_result:
+                        # 保存树结构到 JSON 文件
+                        tree_json_path = title_md_path.parent / f"{title_md_path.stem.replace('_title_with_id', '')}_tree.json"
+                        tree_json_path.write_text(
+                            json.dumps(tree_result, ensure_ascii=False, indent=2),
+                            encoding='utf-8'
+                        )
+                        print(f"[Docling Task] 文档树已保存: {tree_json_path.name}")
+                        print(f"[Docling Task] 树结构统计: {tree_result['summary']}")
+
+                        artifacts["tree"] = {
+                            "path": str(tree_json_path),
+                            "summary": tree_result["summary"]
+                        }
                 except Exception as e:
                     print(f"[Docling Task] 千问标题提取失败: {e}")
                     import traceback
@@ -159,6 +198,7 @@ class DoclingBackgroundTask:
                 save_labeled=True,
                 save_headers=True,
                 save_markdown_json=True,
+                save_fulltext=True,
                 save_doctags=False
             )
         else:
@@ -213,8 +253,12 @@ class DoclingBackgroundTask:
         # 提示词
         prompt = """你是一个专业的文档结构分析引擎，**仅**专注于修复原文中所有不规范的标题标记（如误用 | 或 --- 的地方）。
 
+## 说明
+
+
 ## 输出要求
 - 仅在```markdown```中返回修正并层级化后的标题结构，不包含任何段落、表格或说明。
+- **必须保留每个标题后跟随的 {id=...} 标识符**，原样附在标题行末尾。
 - 标题层级使用# ## ### 在markdown中显示。
 
 示例输出格式：
@@ -251,22 +295,66 @@ class DoclingBackgroundTask:
         else:
             markdown_content = response.strip()
 
+        # 正则匹配 {id=xxx} 格式
+        id_pattern = re.compile(r'\{id=([^}]+)\}')
+
         # 将 Markdown 标题转换为结构化数据
         headings = []
         for line in markdown_content.split('\n'):
             line = line.strip()
             if line.startswith('#'):
                 level = len(line) - len(line.lstrip('#'))
-                text = line.lstrip('#').strip()
+                text_with_id = line.lstrip('#').strip()
+
+                # 提取 id
+                id_match = id_pattern.search(text_with_id)
+                node_id = id_match.group(1) if id_match else None
+
+                # 移除 {id=xxx} 部分，得到纯文本
+                text = id_pattern.sub('', text_with_id).strip()
+
                 if text:
                     headings.append({
+                        "id": node_id,
                         "text": text,
                         "level": level,
-                        "page": ""
+                        "page": None,
+                        "bboxes": []
                     })
 
         print(f"[Qwen] 提取完成，共 {len(headings)} 个标题")
         return headings
+
+    def _build_document_tree(
+        self,
+        model_headings: list,
+        fulltext_data: list
+    ) -> Optional[Dict[str, Any]]:
+        """
+        使用 LevelTreeConstructor 构建文档层级树
+
+        Args:
+            model_headings: 千问返回的标题列表（带 level）
+            fulltext_data: docling fulltext 数据（按阅读顺序）
+
+        Returns:
+            树结构和统计信息
+        """
+        try:
+            from tender_ontology.utils.document_struct.tree import LevelTreeConstructor
+
+            constructor = LevelTreeConstructor(verbose=True)
+            result = constructor.build_tree(model_headings, fulltext_data)
+
+            # 打印树结构预览（只显示标题）
+            constructor.print_tree(max_depth=4, show_non_headers=False)
+
+            return result
+        except Exception as e:
+            print(f"[Docling Task] 构建文档树失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def _collect_artifacts(self, results: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -335,18 +423,11 @@ class DoclingBackgroundTask:
             artifacts: 生成的文件信息
         """
         try:
-            from tender_ontology.utils.db.mysql import MySQLUtil
+            from tender_ontology.utils.db.mysql import get_db
             from tender_ontology.utils.db.mysql.models import ComplianceFileTask
 
-            mysql = MySQLUtil(
-                host="172.16.0.116",
-                port=3306,
-                user="root",
-                password="123456",
-                database="tender_compliance",
-                charset="utf8mb4",
-                echo=False
-            )
+            # 使用全局数据库连接池
+            mysql = get_db()
 
             with mysql.get_session() as session:
                 task = session.query(ComplianceFileTask).filter(
@@ -369,8 +450,6 @@ class DoclingBackgroundTask:
 
                     session.commit()
                     print(f"[Docling Task] Task {task_id} status updated to {status}")
-
-            mysql.close()
 
         except Exception as e:
             print(f"[Docling Task] Failed to update task status: {e}")

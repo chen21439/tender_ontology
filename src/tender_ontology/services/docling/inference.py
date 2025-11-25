@@ -15,7 +15,7 @@ from docling.datamodel.pipeline_options import TableFormerMode
 
 from tender_ontology.config.docling_settings import docling_settings
 from .converter import LabeledJsonConverter
-from .artifact_converter import SectionHeaderConverter, MarkdownJsonConverter
+from .artifact_converter import SectionHeaderConverter, MarkdownJsonConverter, FulltextJsonConverter, TitleMarkdownConverter
 
 
 class DoclingInferenceService:
@@ -66,7 +66,8 @@ class DoclingInferenceService:
         save_labeled: bool = True,
         save_doctags: bool = False,
         save_headers: bool = True,
-        save_markdown_json: bool = True
+        save_markdown_json: bool = True,
+        save_fulltext: bool = True
     ) -> Dict[str, Any]:
         """
         对文档进行推理
@@ -79,6 +80,7 @@ class DoclingInferenceService:
             save_doctags: 是否保存 doctags
             save_headers: 是否保存 section headers JSON
             save_markdown_json: 是否保存 markdown JSON (段落+标题)
+            save_fulltext: 是否保存 fulltext JSON (统一 ID 体系，含表格)
 
         Returns:
             包含推理结果和文件路径的字典
@@ -259,6 +261,27 @@ class DoclingInferenceService:
             markdown_converter.convert_and_save(json_data, markdown_json_path)
             results["markdown_json_path"] = str(markdown_json_path)
             print(f"  ✅ Markdown JSON 已保存: {markdown_json_path.name}")
+
+        # 7. Fulltext JSON (统一 ID 体系，含表格)
+        if save_fulltext and json_data:
+            fulltext_path = self.output_dir / f"{doc_name}_{timestamp}_fulltext.json"
+            fulltext_converter = FulltextJsonConverter(
+                debug=False,
+                process_tables=True  # fulltext 始终包含表格
+            )
+            fulltext_converter.convert_and_save(json_data, fulltext_path)
+            results["fulltext_path"] = str(fulltext_path)
+            print(f"  ✅ Fulltext JSON 已保存: {fulltext_path.name} (统一ID, 含表格)")
+
+            # 8. Title Markdown (带 ID 锚点的 Markdown，含表格)
+            title_md_path = self.output_dir / f"{doc_name}_{timestamp}_title_with_id.md"
+            title_md_converter = TitleMarkdownConverter(
+                debug=False,
+                process_tables=True  # 始终包含表格
+            )
+            title_md_converter.convert_and_save(json_data, title_md_path)
+            results["title_md_path"] = str(title_md_path)
+            print(f"  ✅ Title Markdown 已保存: {title_md_path.name} (带ID锚点, 含表格)")
 
         save_time = time.time() - save_start_time
         total_time = time.time() - total_start_time

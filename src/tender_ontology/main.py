@@ -3,17 +3,37 @@ FastAPI application entry point for tender ontology service.
 """
 
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from tender_ontology.routers import health, ontology, pdf_upload
+from tender_ontology.utils.db.mysql import init_db, close_db
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    应用生命周期管理
+
+    启动时初始化数据库连接池，关闭时释放
+    """
+    # 启动时：初始化数据库连接池
+    init_db()
+
+    yield
+
+    # 关闭时：释放数据库连接池
+    close_db()
+
 
 app = FastAPI(
     title="Tender Ontology API",
     description="API for managing tender/bid ontology and knowledge graph",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # Configure CORS
