@@ -70,66 +70,47 @@ class DoclingBackgroundTask:
             # 3. 读取生成的文件内容
             artifacts = self._collect_artifacts(results)
 
-            # 3.5 调用千问提取层级标题（使用带 ID 的 markdown 文件）
-            qwen_headings = None
-            if "title_md_path" in results and "fulltext_path" in results:
-                try:
-                    from .qwen_heading_extractor import QwenDirectExtractor
+            # 3.5 并行调用两个千问 API
+            fulltext_data = None
+            if "fulltext_path" in results:
+                fulltext_path = Path(results["fulltext_path"])
+                fulltext_data = json.loads(fulltext_path.read_text(encoding='utf-8'))
+                header_count = sum(1 for item in fulltext_data if item.get("label") == "section_header")
+                print(f"[Docling Task] fulltext.json 中共有 {header_count} 个标题")
 
-                    # 先读取 fulltext.json 获取标题数量
-                    fulltext_path = Path(results["fulltext_path"])
-                    fulltext_data = json.loads(fulltext_path.read_text(encoding='utf-8'))
+            # 并行执行两个千问调用
+            if fulltext_data and "title_md_path" in results and "header_only_path" in results:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
 
-                    # 统计 section_header 数量
-                    header_count = sum(1 for item in fulltext_data if item.get("label") == "section_header")
-                    print(f"[Docling Task] fulltext.json 中共有 {header_count} 个标题")
+                print(f"[Docling Task] 开始并行调用千问 API...")
 
-                    # 使用直接内容提取器（推荐，效果更好）
-                    extractor = QwenDirectExtractor()
-                    print(f"[Docling Task] 开始千问标题提取（直接内容模式）...")
-                    qwen_headings = extractor.extract_headings(
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    # 提交两个任务
+                    future_all_headings = executor.submit(
+                        self._extract_all_headings,
                         results["title_md_path"],
-                        header_count=header_count,
-                        verbose=True
+                        header_count,
+                        fulltext_data
                     )
-                    print(f"[Docling Task] 千问标题提取完成，共 {len(qwen_headings)} 个标题")
+                    future_level12 = executor.submit(
+                        self._extract_level12_headings,
+                        results["header_only_path"],
+                        fulltext_data
+                    )
 
-                    # 填充位置信息
-                    extractor.enrich_headings_with_location(qwen_headings, fulltext_data, verbose=True)
+                    # 等待两个任务完成
+                    for future in as_completed([future_all_headings, future_level12]):
+                        try:
+                            result_data = future.result()
+                            if result_data:
+                                # 合并结果到 artifacts
+                                artifacts.update(result_data)
+                        except Exception as e:
+                            print(f"[Docling Task] 千问调用异常: {e}")
+                            import traceback
+                            traceback.print_exc()
 
-                    # 保存千问标题到 JSON 文件（直接保存数组）
-                    title_md_path = Path(results["title_md_path"])
-                    model_json_path = title_md_path.parent / f"{title_md_path.stem.replace('_title_with_id', '')}_model.json"
-                    model_json_path.write_text(json.dumps(qwen_headings, ensure_ascii=False, indent=2), encoding='utf-8')
-                    print(f"[Docling Task] 模型标题已保存: {model_json_path.name}")
-
-                    artifacts["model"] = {
-                        "path": str(model_json_path),
-                        "total_headings": len(qwen_headings)
-                    }
-
-                    # 4. 使用 LevelTreeConstructor 构建完整文档树
-                    print(f"[Docling Task] 开始构建文档层级树...")
-                    tree_result = self._build_document_tree(qwen_headings, fulltext_data)
-
-                    if tree_result:
-                        # 保存树结构到 JSON 文件
-                        tree_json_path = title_md_path.parent / f"{title_md_path.stem.replace('_title_with_id', '')}_tree.json"
-                        tree_json_path.write_text(
-                            json.dumps(tree_result, ensure_ascii=False, indent=2),
-                            encoding='utf-8'
-                        )
-                        print(f"[Docling Task] 文档树已保存: {tree_json_path.name}")
-                        print(f"[Docling Task] 树结构统计: {tree_result['summary']}")
-
-                        artifacts["tree"] = {
-                            "path": str(tree_json_path),
-                            "summary": tree_result["summary"]
-                        }
-                except Exception as e:
-                    print(f"[Docling Task] 千问标题提取失败: {e}")
-                    import traceback
-                    traceback.print_exc()
+                print(f"[Docling Task] 千问 API 并行调用完成")
 
             # 4. 更新数据库状态为"完成"
             if db_task_id:
@@ -211,6 +192,149 @@ class DoclingBackgroundTask:
                 save_doctags=False
             )
         return results
+
+    def _extract_all_headings(
+        self,
+        title_md_path: str,
+        header_count: int,
+        fulltext_data: list
+    ) -> Optional[Dict[str, Any]]:
+        """
+        提取所有标题层级（千问调用1）
+
+        Args:
+            title_md_path: title_with_id.md 文件路径
+            header_count: 标题数量
+            fulltext_data: fulltext 数据
+
+        Returns:
+            artifacts 字典
+        """
+        try:
+            from .qwen_heading_extractor import QwenDirectExtractor
+
+            print(f"[Qwen API 1] 开始提取所有标题层级...")
+
+            extractor = QwenDirectExtractor()
+            qwen_headings = extractor.extract_headings(
+                title_md_path,
+                header_count=header_count,
+                verbose=True
+            )
+            print(f"[Qwen API 1] 提取完成，共 {len(qwen_headings)} 个标题")
+
+            # 填充位置信息
+            extractor.enrich_headings_with_location(qwen_headings, fulltext_data, verbose=True)
+
+            # 保存结果
+            title_md_path = Path(title_md_path)
+            base_name = title_md_path.stem.replace('_title_with_id', '')
+            output_dir = title_md_path.parent
+
+            artifacts = {}
+
+            # 保存 _model.json
+            model_json_path = output_dir / f"{base_name}_model.json"
+            model_json_path.write_text(
+                json.dumps(qwen_headings, ensure_ascii=False, indent=2),
+                encoding='utf-8'
+            )
+            print(f"[Qwen API 1] 模型标题已保存: {model_json_path.name}")
+            artifacts["model"] = {
+                "path": str(model_json_path),
+                "total_headings": len(qwen_headings)
+            }
+
+            # 构建文档树
+            print(f"[Qwen API 1] 开始构建文档层级树...")
+            tree_result = self._build_document_tree(qwen_headings, fulltext_data)
+
+            if tree_result:
+                # 保存 _tree.json
+                tree_json_path = output_dir / f"{base_name}_tree.json"
+                tree_json_path.write_text(
+                    json.dumps(tree_result, ensure_ascii=False, indent=2),
+                    encoding='utf-8'
+                )
+                print(f"[Qwen API 1] 文档树已保存: {tree_json_path.name}")
+                artifacts["tree"] = {
+                    "path": str(tree_json_path),
+                    "summary": tree_result["summary"]
+                }
+
+                # 保存 _forward.json
+                if "artifact" in tree_result:
+                    forward_json_path = output_dir / f"{base_name}_forward.json"
+                    forward_json_path.write_text(
+                        json.dumps(tree_result["artifact"], ensure_ascii=False, indent=2),
+                        encoding='utf-8'
+                    )
+                    print(f"[Qwen API 1] Forward JSON 已保存: {forward_json_path.name}")
+                    artifacts["forward"] = {"path": str(forward_json_path)}
+
+            return artifacts
+
+        except Exception as e:
+            print(f"[Qwen API 1] 提取失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _extract_level12_headings(
+        self,
+        header_only_path: str,
+        fulltext_data: list
+    ) -> Optional[Dict[str, Any]]:
+        """
+        提取一二级标题（千问调用2）
+
+        Args:
+            header_only_path: sectionHeader_only.md 文件路径
+            fulltext_data: fulltext 数据
+
+        Returns:
+            artifacts 字典
+        """
+        try:
+            from .qwen_heading_extractor import QwenHeadingExtractor
+
+            print(f"[Qwen API 2] 开始提取一二级标题...")
+
+            extractor = QwenHeadingExtractor()
+            level12_headings = extractor.extract_headings(
+                header_only_path,
+                header_count=0,
+                verbose=True
+            )
+            print(f"[Qwen API 2] 提取完成，共 {len(level12_headings)} 个标题")
+
+            # 填充位置信息
+            extractor.enrich_headings_with_location(level12_headings, fulltext_data, verbose=True)
+
+            # 保存结果
+            header_only_path = Path(header_only_path)
+            base_name = header_only_path.stem.replace('_sectionHeader_only', '')
+            output_dir = header_only_path.parent
+
+            level12_json_path = output_dir / f"{base_name}_level12.json"
+            level12_json_path.write_text(
+                json.dumps(level12_headings, ensure_ascii=False, indent=2),
+                encoding='utf-8'
+            )
+            print(f"[Qwen API 2] 一二级标题已保存: {level12_json_path.name}")
+
+            return {
+                "level12": {
+                    "path": str(level12_json_path),
+                    "total_headings": len(level12_headings)
+                }
+            }
+
+        except Exception as e:
+            print(f"[Qwen API 2] 提取失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
 
     def _build_document_tree(
         self,

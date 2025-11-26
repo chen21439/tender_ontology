@@ -66,6 +66,31 @@ class TreeNode:
 
         return result
 
+    def to_artifact_dict(self, include_children: bool = True) -> Dict[str, Any]:
+        """
+        转换为 artifact 格式字典
+
+        格式：
+        - pid: 原 id
+        - title: 如果是 section_header 则为 text，否则为空字符串
+        - content: text 内容
+        - location: bboxes 数组
+        """
+        result = {
+            "pid": self.id,
+            "title": self.text if self.label == "section_header" else "",
+            "content": self.text,
+            "location": self.bboxes if self.bboxes else []
+        }
+
+        if include_children and self.children:
+            result["children"] = [
+                child.to_artifact_dict(include_children=True)
+                for child in self.children
+            ]
+
+        return result
+
     def __repr__(self):
         return f"TreeNode(id={self.id}, level={self.level}, text='{self.text[:20]}...', children={len(self.children)})"
 
@@ -279,9 +304,15 @@ class LevelTreeConstructor:
 
     def _build_result(self) -> Dict[str, Any]:
         """构建最终结果"""
-        # 序列化树结构
+        # 序列化树结构（原始格式）
         tree_structure = [
             root.to_dict(include_children=True)
+            for root in self.root_nodes
+        ]
+
+        # 序列化树结构（artifact 格式）
+        artifact_structure = [
+            root.to_artifact_dict(include_children=True)
             for root in self.root_nodes
         ]
 
@@ -296,6 +327,7 @@ class LevelTreeConstructor:
 
         return {
             "tree": tree_structure,
+            "artifact": artifact_structure,
             "summary": {
                 "total_nodes": len(self.nodes_map),
                 "root_nodes": len(self.root_nodes),
