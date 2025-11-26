@@ -130,10 +130,9 @@ class LevelTreeConstructor:
             if label == "section_header" and node_id in heading_level_map:
                 level = heading_level_map[node_id]
             elif label == "section_header":
-                # 标题但不在模型结果中，使用默认 level 1
-                level = 1
-                if self.verbose:
-                    print(f"[LevelTreeConstructor]   ⚠️ 标题 {node_id} 不在模型结果中，使用默认 level=1")
+                # 标题但不在模型结果中，当作普通段落处理
+                level = self.NON_HEADING_LEVEL
+                label = "text"  # 修改 label 为 text
             else:
                 # 非标题节点
                 level = self.NON_HEADING_LEVEL

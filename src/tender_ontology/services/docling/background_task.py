@@ -74,29 +74,28 @@ class DoclingBackgroundTask:
             qwen_headings = None
             if "title_md_path" in results and "fulltext_path" in results:
                 try:
-                    print(f"[Docling Task] 开始千问标题提取...")
-                    qwen_headings = self._extract_headings_with_qwen(results["title_md_path"])
-                    print(f"[Docling Task] 千问标题提取完成，共 {len(qwen_headings)} 个标题")
+                    from .qwen_heading_extractor import QwenHeadingExtractor
 
-                    # 从 fulltext.json 读取 id -> page/bboxes 映射
+                    # 先读取 fulltext.json 获取标题数量
                     fulltext_path = Path(results["fulltext_path"])
                     fulltext_data = json.loads(fulltext_path.read_text(encoding='utf-8'))
 
-                    # 构建 id 到元素的映射
-                    id_to_element = {item["id"]: item for item in fulltext_data if "id" in item}
-                    print(f"[Docling Task] 从 fulltext.json 构建了 {len(id_to_element)} 个 ID 映射")
+                    # 统计 section_header 数量
+                    header_count = sum(1 for item in fulltext_data if item.get("label") == "section_header")
+                    print(f"[Docling Task] fulltext.json 中共有 {header_count} 个标题")
 
-                    # 填充 page 和 bboxes 信息
-                    matched_count = 0
-                    for heading in qwen_headings:
-                        node_id = heading.get("id")
-                        if node_id and node_id in id_to_element:
-                            element = id_to_element[node_id]
-                            heading["page"] = element.get("page")
-                            heading["bboxes"] = element.get("bboxes", [])
-                            matched_count += 1
+                    # 使用独立的提取器
+                    extractor = QwenHeadingExtractor()
+                    print(f"[Docling Task] 开始千问标题提取...")
+                    qwen_headings = extractor.extract_headings(
+                        results["title_md_path"],
+                        header_count=header_count,
+                        verbose=True
+                    )
+                    print(f"[Docling Task] 千问标题提取完成，共 {len(qwen_headings)} 个标题")
 
-                    print(f"[Docling Task] 成功匹配 {matched_count}/{len(qwen_headings)} 个标题的位置信息")
+                    # 填充位置信息
+                    extractor.enrich_headings_with_location(qwen_headings, fulltext_data, verbose=True)
 
                     # 保存千问标题到 JSON 文件（直接保存数组）
                     title_md_path = Path(results["title_md_path"])
@@ -212,118 +211,6 @@ class DoclingBackgroundTask:
                 save_doctags=False
             )
         return results
-
-    def _extract_headings_with_qwen(self, markdown_path: str) -> list:
-        """
-        使用千问API提取Markdown中的层级标题（完整流程：上传+提取）
-
-        Args:
-            markdown_path: Markdown 文件路径
-
-        Returns:
-            标题列表，每个标题包含 text, level, page 字段
-        """
-        from tender_ontology.utils.document_struct.qwen_client import QwenClient
-
-        # 创建千问客户端
-        api_key = "sk-f67e1a1d436c4df19ac575d8483e247d"
-        client = QwenClient(api_key=api_key, model="qwen-long")
-
-        # 第一步：上传文件获取 file_id
-        print(f"[Qwen] 上传文件中...")
-        file_id = client.upload_file(markdown_path, purpose="file-extract", verbose=True)
-        print(f"[Qwen] 文件上传成功，file_id: {file_id}")
-
-        # 第二步：使用 file_id 提取标题
-        return self.extract_headings_by_file_id(file_id)
-
-    def extract_headings_by_file_id(self, file_id: str = "file-fe-b75e560d00cc48bfa37e36ca") -> list:
-        """
-        使用千问API根据 file_id 提取标题（独立方法，可直接调用）
-
-        Args:
-            file_id: 千问文件ID，默认使用测试文件
-
-        Returns:
-            标题列表，每个标题包含 text, level, page 字段
-        """
-        from tender_ontology.utils.document_struct.qwen_client import QwenClient
-        import re
-
-        # 提示词
-        prompt = """你是一个专业的文档结构分析引擎，**仅**专注于修复原文中所有不规范的标题标记（如误用 | 或 --- 的地方）。
-
-## 说明
-
-
-## 输出要求
-- 仅在```markdown```中返回修正并层级化后的标题结构，不包含任何段落、表格或说明。
-- **必须保留每个标题后跟随的 {id=...} 标识符**，原样附在标题行末尾。
-- 标题层级使用# ## ### 在markdown中显示。
-
-示例输出格式：
-```markdown
-# 一级标题
-## 二级标题
-### 三级标题
-#### 四级标题
-```
-
-现在，请提取文档中的所有标题。"""
-
-        # 创建千问客户端
-        api_key = "sk-f67e1a1d436c4df19ac575d8483e247d"
-        client = QwenClient(api_key=api_key, model="qwen-long-latest")
-
-        # 构建消息（fileid 放在 system，任务放在 user）
-        system_prompt = f"fileid://{file_id}"
-
-        print(f"[Qwen] 使用 file_id: {file_id} 提取标题...")
-
-        # 发送请求
-        response = client.send_request(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            temperature=0.0,
-            verbose=True
-        )
-
-        # 解析 Markdown 响应
-        markdown_match = re.search(r'```markdown\s*(.*?)\s*```', response, re.DOTALL)
-        if markdown_match:
-            markdown_content = markdown_match.group(1).strip()
-        else:
-            markdown_content = response.strip()
-
-        # 正则匹配 {id=xxx} 格式
-        id_pattern = re.compile(r'\{id=([^}]+)\}')
-
-        # 将 Markdown 标题转换为结构化数据
-        headings = []
-        for line in markdown_content.split('\n'):
-            line = line.strip()
-            if line.startswith('#'):
-                level = len(line) - len(line.lstrip('#'))
-                text_with_id = line.lstrip('#').strip()
-
-                # 提取 id
-                id_match = id_pattern.search(text_with_id)
-                node_id = id_match.group(1) if id_match else None
-
-                # 移除 {id=xxx} 部分，得到纯文本
-                text = id_pattern.sub('', text_with_id).strip()
-
-                if text:
-                    headings.append({
-                        "id": node_id,
-                        "text": text,
-                        "level": level,
-                        "page": None,
-                        "bboxes": []
-                    })
-
-        print(f"[Qwen] 提取完成，共 {len(headings)} 个标题")
-        return headings
 
     def _build_document_tree(
         self,
@@ -476,14 +363,15 @@ def get_background_task_handler() -> DoclingBackgroundTask:
 
 if __name__ == "__main__":
     # 直接测试千问标题提取
-    handler = get_background_task_handler()
+    from .qwen_heading_extractor import QwenHeadingExtractor
 
     # 使用默认 file_id 或者传入你自己的
     file_id = "file-fe-b75e560d00cc48bfa37e36ca"
 
     print(f"开始提取标题，使用 file_id: {file_id}\n")
 
-    headings = handler.extract_headings_by_file_id(file_id)
+    extractor = QwenHeadingExtractor()
+    headings = extractor.extract_headings_by_file_id(file_id)
 
     print(f"\n{'='*80}")
     print(f"提取完成！共 {len(headings)} 个标题")
