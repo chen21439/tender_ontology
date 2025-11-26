@@ -283,6 +283,13 @@ class DoclingInferenceService:
             results["title_md_path"] = str(title_md_path)
             print(f"  ✅ Title Markdown 已保存: {title_md_path.name} (带ID锚点, 含表格)")
 
+            # 9. Section Header Only Markdown (只包含标题)
+            header_only_path = self.output_dir / f"{doc_name}_{timestamp}_sectionHeader_only.md"
+            header_only_converter = SectionHeaderOnlyConverter(debug=False)
+            header_only_converter.convert_and_save(json_data, header_only_path)
+            results["header_only_path"] = str(header_only_path)
+            print(f"  ✅ Section Header Only 已保存: {header_only_path.name}")
+
         save_time = time.time() - save_start_time
         total_time = time.time() - total_start_time
 
