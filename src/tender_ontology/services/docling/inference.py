@@ -15,7 +15,7 @@ from docling.datamodel.pipeline_options import TableFormerMode
 
 from tender_ontology.config.docling_settings import docling_settings
 from .converter import LabeledJsonConverter
-from .artifact_converter import SectionHeaderConverter, MarkdownJsonConverter, FulltextJsonConverter, TitleMarkdownConverter
+from .artifact_converter import SectionHeaderConverter, MarkdownJsonConverter, FulltextJsonConverter, TitleMarkdownConverter, SectionHeaderOnlyConverter
 
 
 class DoclingInferenceService:
