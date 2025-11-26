@@ -74,7 +74,7 @@ class DoclingBackgroundTask:
             qwen_headings = None
             if "title_md_path" in results and "fulltext_path" in results:
                 try:
-                    from .qwen_heading_extractor import QwenHeadingExtractor
+                    from .qwen_heading_extractor import QwenDirectExtractor
 
                     # 先读取 fulltext.json 获取标题数量
                     fulltext_path = Path(results["fulltext_path"])
@@ -84,9 +84,9 @@ class DoclingBackgroundTask:
                     header_count = sum(1 for item in fulltext_data if item.get("label") == "section_header")
                     print(f"[Docling Task] fulltext.json 中共有 {header_count} 个标题")
 
-                    # 使用独立的提取器
-                    extractor = QwenHeadingExtractor()
-                    print(f"[Docling Task] 开始千问标题提取...")
+                    # 使用直接内容提取器（推荐，效果更好）
+                    extractor = QwenDirectExtractor()
+                    print(f"[Docling Task] 开始千问标题提取（直接内容模式）...")
                     qwen_headings = extractor.extract_headings(
                         results["title_md_path"],
                         header_count=header_count,
@@ -362,22 +362,31 @@ def get_background_task_handler() -> DoclingBackgroundTask:
 
 
 if __name__ == "__main__":
-    # 直接测试千问标题提取
-    from .qwen_heading_extractor import QwenHeadingExtractor
+    # 直接测试千问标题提取（直接内容模式）
+    from .qwen_heading_extractor import QwenDirectExtractor
 
-    # 使用默认 file_id 或者传入你自己的
-    file_id = "file-fe-b75e560d00cc48bfa37e36ca"
+    # 测试文件路径
+    test_file = "path/to/your/markdown_file.md"
 
-    print(f"开始提取标题，使用 file_id: {file_id}\n")
+    print(f"开始提取标题（直接内容模式）\n")
+    print(f"测试文件: {test_file}\n")
 
-    extractor = QwenHeadingExtractor()
-    headings = extractor.extract_headings_by_file_id(file_id)
+    extractor = QwenDirectExtractor()
 
-    print(f"\n{'='*80}")
-    print(f"提取完成！共 {len(headings)} 个标题")
-    print(f"{'='*80}\n")
+    # 如果文件存在则提取
+    from pathlib import Path
+    if Path(test_file).exists():
+        headings = extractor.extract_headings(test_file)
 
-    # 打印所有标题（Markdown 格式）
-    for h in headings:
-        prefix = "#" * h["level"]
-        print(f"{prefix} {h['text']}")
+        print(f"\n{'='*80}")
+        print(f"提取完成！共 {len(headings)} 个标题")
+        print(f"{'='*80}\n")
+
+        # 打印所有标题（Markdown 格式）
+        for h in headings:
+            prefix = "#" * h["level"]
+            id_str = f" {{id={h['id']}}}" if h.get('id') else ""
+            print(f"{prefix} {h['text']}{id_str}")
+    else:
+        print(f"测试文件不存在: {test_file}")
+        print("请修改 test_file 变量指向有效的 Markdown 文件")
