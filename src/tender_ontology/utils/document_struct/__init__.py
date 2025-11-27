@@ -37,6 +37,17 @@ from .tree import (
     construct_tree_from_predictions
 )
 
+# 坐标转换工具
+from .bbox_utils import (
+    convert_bbox_to_topleft,
+    convert_bboxes_to_topleft,
+    extract_page_heights_from_docling,
+    convert_element_bboxes_to_topleft,
+    convert_fulltext_to_topleft,
+    convert_tree_node_to_topleft,
+    convert_forward_to_topleft
+)
+
 __all__ = [
     # 图像客户端
     "BaiduImageClientBearer",
@@ -57,4 +68,12 @@ __all__ = [
     "TreeConstructor",
     "TreeNode",
     "construct_tree_from_predictions",
+    # 坐标转换工具
+    "convert_bbox_to_topleft",
+    "convert_bboxes_to_topleft",
+    "extract_page_heights_from_docling",
+    "convert_element_bboxes_to_topleft",
+    "convert_fulltext_to_topleft",
+    "convert_tree_node_to_topleft",
+    "convert_forward_to_topleft",
 ]

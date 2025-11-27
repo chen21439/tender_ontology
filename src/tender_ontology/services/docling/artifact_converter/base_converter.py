@@ -5,10 +5,11 @@ BaseConverter - 所有转换器的公共基类
 1. 表格内容过滤（_build_parent_map, _is_in_table）
 2. 阅读顺序构建（_build_reading_order）
 3. 通用工具方法（normalize_id, remove_zero_width_chars, get_element_position）
+4. 坐标转换（convert_bbox_to_topleft）
 """
 
 import re
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, Optional
 
 
 class BaseConverter:
@@ -19,14 +20,17 @@ class BaseConverter:
         r'[\u200B\u200C\u200D\uFEFF\u00AD]'
     )
 
-    def __init__(self, debug: bool = False):
+    def __init__(self, debug: bool = False, convert_to_topleft: bool = True):
         """
         初始化基础转换器
 
         Args:
             debug: 是否启用调试输出
+            convert_to_topleft: 是否将坐标转换为左上角坐标系（默认 True）
         """
         self.debug = debug
+        self.convert_to_topleft = convert_to_topleft
+        self.page_heights: Dict[int, float] = {}  # 页码 -> 页面高度
 
     @staticmethod
     def normalize_id(self_ref: str) -> str:
@@ -65,6 +69,77 @@ class BaseConverter:
             top = bbox.get("t", 0)
             return (page_no, top)
         return (0, 0)
+
+    def _extract_page_heights(self, docling_json: Dict[str, Any]) -> None:
+        """
+        从 Docling JSON 中提取每页的高度信息
+
+        Args:
+            docling_json: Docling 完整 JSON 数据
+        """
+        self.page_heights = {}
+        pages = docling_json.get("pages", {})
+
+        for page_no_str, page_data in pages.items():
+            try:
+                page_no = int(page_no_str)
+                size = page_data.get("size", {})
+                height = size.get("height")
+                if height is not None:
+                    self.page_heights[page_no] = height
+            except (ValueError, TypeError):
+                continue
+
+        if self.debug:
+            print(f"  [DEBUG] 提取了 {len(self.page_heights)} 页的高度信息")
+
+    def _convert_bbox_to_topleft(self, bbox: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        将单个 bbox 从左下角坐标系转换为左上角坐标系
+
+        Docling 使用左下角坐标系（BOTTOMLEFT）：
+        - 原点在页面左下角，Y 轴向上
+        - t (top) 值大表示位置高
+
+        转换为左上角坐标系（TOPLEFT）：
+        - 原点在页面左上角，Y 轴向下
+        - t (top) 值小表示位置高
+
+        Args:
+            bbox: 原始 bbox
+
+        Returns:
+            转换后的 bbox
+        """
+        if not bbox or not self.convert_to_topleft:
+            return bbox
+
+        page_no = bbox.get("page")
+        if page_no is None or page_no not in self.page_heights:
+            # 没有页面高度信息，保持原样
+            return bbox
+
+        page_height = self.page_heights[page_no]
+        old_t = bbox.get("t", 0)
+        old_b = bbox.get("b", 0)
+
+        # 转换公式：y' = page_height - y
+        # 左下角坐标系：t > b（top 值大，bottom 值小）
+        # 左上角坐标系：t < b（top 值小，bottom 值大）
+        new_bbox = {
+            "page": page_no,
+            "l": bbox.get("l"),
+            "t": round(page_height - old_t, 4),
+            "r": bbox.get("r"),
+            "b": round(page_height - old_b, 4),
+            "coord_origin": "TOPLEFT"
+        }
+
+        # 保留可选字段
+        if "charspan" in bbox:
+            new_bbox["charspan"] = bbox["charspan"]
+
+        return new_bbox
 
     def _build_parent_map(self, docling_json: Dict[str, Any]) -> Dict[str, str]:
         """

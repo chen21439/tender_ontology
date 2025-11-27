@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from tender_ontology.routers import health, ontology, pdf_upload
 from tender_ontology.utils.db.local_storage import is_local_mode
@@ -55,10 +56,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
+# Include routers - 直接路径
 app.include_router(health.router, tags=["health"])
 app.include_router(ontology.router, tags=["ontology"])
 app.include_router(pdf_upload.router, prefix="/api/pdf", tags=["PDF上传"])
+
+# 兼容 nginx 转发路径 /python/...
+# 所有 API 都可以通过 /python/... 访问
+app.include_router(health.router, prefix="/python", tags=["health(兼容)"])
+app.include_router(ontology.router, prefix="/python", tags=["ontology(兼容)"])
+app.include_router(pdf_upload.router, prefix="/python/api/pdf", tags=["PDF上传(兼容)"])
 
 # Mount static files
 # Get project root (tender_ontology directory where pyproject.toml is located)
@@ -66,15 +73,52 @@ app.include_router(pdf_upload.router, prefix="/api/pdf", tags=["PDF上传"])
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 STATIC_DIR = PROJECT_ROOT / "static"
 STATIC_DIR.mkdir(exist_ok=True)
+FRONT_DIR = STATIC_DIR / "front"
+
+# 挂载静态文件目录
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.get("/")
 async def root():
-    """Root endpoint."""
+    """
+    根路径 - 返回前端页面或 API 信息
+
+    如果 static/front/index.html 存在，返回前端页面
+    否则返回 API 信息
+    """
+    index_file = FRONT_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(str(index_file))
+
     return {
         "message": "Welcome to Tender Ontology API",
         "version": "0.1.0",
         "docs": "/docs",
         "static_files": "/static",
     }
+
+
+@app.get("/{full_path:path}")
+async def serve_spa(full_path: str):
+    """
+    SPA 路由回退
+
+    对于前端路由（如 /task/123），返回 index.html 由前端 JS 处理
+    排除 API、静态文件、文档等路径
+    """
+    # 排除后端路径
+    excluded_prefixes = ("api/", "static/", "docs", "openapi", "redoc", "health")
+    if full_path.startswith(excluded_prefixes):
+        # 返回 None 会导致 404，让 FastAPI 继续匹配其他路由
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Not found")
+
+    # 返回前端入口文件
+    index_file = FRONT_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(str(index_file))
+
+    # 前端文件不存在，返回 404
+    from fastapi import HTTPException
+    raise HTTPException(status_code=404, detail="Not found")

@@ -18,15 +18,16 @@ from .base_converter import BaseConverter
 class FulltextJsonConverter(BaseConverter):
     """将 Docling JSON 转换为完整文档内容（统一 ID 体系）"""
 
-    def __init__(self, debug: bool = False, process_tables: bool = True):
+    def __init__(self, debug: bool = False, process_tables: bool = True, convert_to_topleft: bool = True):
         """
         初始化转换器
 
         Args:
             debug: 是否启用调试输出
             process_tables: 是否处理表格
+            convert_to_topleft: 是否将坐标转换为左上角坐标系（默认 True）
         """
-        super().__init__(debug=debug)
+        super().__init__(debug=debug, convert_to_topleft=convert_to_topleft)
         self.process_tables = process_tables
         self.ref_map = {}
 
@@ -40,6 +41,10 @@ class FulltextJsonConverter(BaseConverter):
         Returns:
             元素数组，每个元素包含统一的 ID
         """
+        # 提取页面高度（用于坐标转换）
+        if self.convert_to_topleft:
+            self._extract_page_heights(docling_json)
+
         # 构建引用映射（用于表格单元格）
         self.ref_map = self._build_ref_map(docling_json)
 
@@ -222,6 +227,8 @@ class FulltextJsonConverter(BaseConverter):
         """
         从 item 的 prov 字段中提取所有 bbox
 
+        如果启用了 convert_to_topleft，会自动将坐标从左下角坐标系转换为左上角坐标系
+
         Args:
             item: 包含 prov 字段的元素
 
@@ -251,6 +258,10 @@ class FulltextJsonConverter(BaseConverter):
             # 可选：添加 charspan
             if charspan:
                 bbox_data["charspan"] = charspan
+
+            # 坐标转换（如果启用）
+            if self.convert_to_topleft:
+                bbox_data = self._convert_bbox_to_topleft(bbox_data)
 
             bboxes.append(bbox_data)
 
