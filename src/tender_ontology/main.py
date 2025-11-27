@@ -73,10 +73,13 @@ app.include_router(pdf_upload.router, prefix="/python/api/pdf", tags=["PDF上传
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 STATIC_DIR = PROJECT_ROOT / "static"
 STATIC_DIR.mkdir(exist_ok=True)
-FRONT_DIR = STATIC_DIR / "front"
+FRONT_DIR = STATIC_DIR / "AI-document"
 
 # 挂载静态文件目录
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+# 挂载前端目录（可通过 /AI-document/... 访问，不带 static 前缀）
+if FRONT_DIR.exists():
+    app.mount("/AI-document", StaticFiles(directory=str(FRONT_DIR), html=True), name="frontend")
 
 
 @app.get("/")
@@ -84,7 +87,7 @@ async def root():
     """
     根路径 - 返回前端页面或 API 信息
 
-    如果 static/front/index.html 存在，返回前端页面
+    如果 static/AI-document/index.html 存在，返回前端页面
     否则返回 API 信息
     """
     index_file = FRONT_DIR / "index.html"

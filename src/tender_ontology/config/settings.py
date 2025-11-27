@@ -31,6 +31,10 @@ class Settings(BaseSettings):
     # File Storage
     file_storage_base: str = "static"
 
+    # External API - Tender Extract Ontology
+    tender_extract_api_url: str = "http://localhost:8080/tender/extract_onto"
+    tender_extract_api_timeout: int = 600  # 10分钟超时
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
