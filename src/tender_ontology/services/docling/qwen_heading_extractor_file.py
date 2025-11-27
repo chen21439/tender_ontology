@@ -9,9 +9,14 @@
 import re
 import asyncio
 import aiohttp
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor
+
+# 导入工具类
+from tender_ontology.utils.request.ai_client import AIClient
+from tender_ontology.utils.request.batch_processor import BatchProcessor
 
 
 class QwenHeadingExtractor:
@@ -270,6 +275,45 @@ class QwenHeadingExtractor:
 
         return matched_count
 
+    def _enrich_markdown_with_type(self, markdown_content: str) -> str:
+        """
+        为 markdown 标题添加 type 标记
+
+        规则：
+        - 册/部分/节 → type=volume
+        - 章 → type=chapter
+
+        Args:
+            markdown_content: 原始 markdown 内容
+
+        Returns:
+            添加了 type 标记的 markdown 内容
+        """
+        # 匹配 册/部分/节 的模式
+        volume_pattern = re.compile(r'第[一二三四五六七八九十\d]+[册部分节]')
+        # 匹配 章 的模式
+        chapter_pattern = re.compile(r'第[一二三四五六七八九十\d]+章')
+
+        enriched_lines = []
+        for line in markdown_content.split('\n'):
+            if line.strip().startswith('#'):
+                # 判断标题类型
+                if volume_pattern.search(line):
+                    # 在 {id=xxx} 前插入 type=volume
+                    if '{id=' in line:
+                        line = re.sub(r'\{id=', '{type=volume, id=', line)
+                    else:
+                        line = line.rstrip() + ' {type=volume}'
+                elif chapter_pattern.search(line):
+                    # 在 {id=xxx} 前插入 type=chapter
+                    if '{id=' in line:
+                        line = re.sub(r'\{id=', '{type=chapter, id=', line)
+                    else:
+                        line = line.rstrip() + ' {type=chapter}'
+            enriched_lines.append(line)
+
+        return '\n'.join(enriched_lines)
+
     # ========== 内部千问32b API 调用 ==========
 
     INTERNAL_API_URL = "http://175.42.62.118:9102/v1/chat/completions"
@@ -336,6 +380,17 @@ class QwenHeadingExtractor:
                     print(f"[Qwen32b] 完整响应已保存: {save_response_path.name}")
 
             content_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+            # 保存千问返回的markdown内容（带时间戳，添加type标记）
+            if save_response_path and content_text:
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                md_path = save_response_path.parent / f"{save_response_path.stem}_{timestamp}.md"
+                # 为markdown添加type标记
+                enriched_content = self._enrich_markdown_with_type(content_text)
+                md_path.write_text(enriched_content, encoding='utf-8')
+                if verbose:
+                    print(f"[Qwen32b] Markdown响应已保存: {md_path.name}")
 
             if verbose:
                 print(f"[Qwen32b] 内部API调用成功")
@@ -597,3 +652,651 @@ class QwenHeadingExtractor:
             print(f"  - 内部API (qwen3-32b): {len(internal_result)} 个标题")
 
         return external_result, internal_result
+
+    # ========== 章节切分与并发层级重建 ==========
+
+    def parse_stage1_markdown(
+        self,
+        md_content: str,
+        verbose: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        解析一阶段返回的 markdown 内容，提取 type=chapter 的标题
+
+        Args:
+            md_content: 一阶段返回的 markdown 内容（带 type 标记）
+            verbose: 是否打印详细信息
+
+        Returns:
+            章节标题列表 [{id, text, level, type}, ...]
+        """
+        chapter_headings = []
+        # 匹配带 type=chapter 的标题行
+        # 格式如: # 第一章 招标公告 {type=chapter, id=texts-100}
+        pattern = re.compile(
+            r'^(#+)\s*(.+?)\s*\{type=chapter,\s*id=([^}]+)\}',
+            re.MULTILINE
+        )
+
+        for match in pattern.finditer(md_content):
+            level = len(match.group(1))
+            text = match.group(2).strip()
+            node_id = match.group(3).strip()
+
+            chapter_headings.append({
+                "id": node_id,
+                "text": text,
+                "level": level,
+                "type": "chapter"
+            })
+
+        if verbose:
+            print(f"[阶段1解析] 从 markdown 中提取到 {len(chapter_headings)} 个章节标题")
+
+        return chapter_headings
+
+    def find_latest_stage1_markdown(
+        self,
+        task_dir: Path,
+        verbose: bool = True
+    ) -> Optional[Path]:
+        """
+        查找任务目录中最新的一阶段 markdown 文件
+
+        一阶段文件命名格式: *_level12_response_YYYYMMDD_HHMMSS.md
+
+        Args:
+            task_dir: 任务目录
+            verbose: 是否打印详细信息
+
+        Returns:
+            最新的一阶段 markdown 文件路径，未找到返回 None
+        """
+        # 查找所有一阶段响应文件
+        pattern = "*_level12_response_*.md"
+        md_files = list(task_dir.glob(pattern))
+
+        if not md_files:
+            if verbose:
+                print(f"[查找] 未找到一阶段 markdown 文件 (pattern: {pattern})")
+            return None
+
+        # 按修改时间排序，取最新的
+        md_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+        latest = md_files[0]
+
+        if verbose:
+            print(f"[查找] 找到 {len(md_files)} 个一阶段文件，使用最新的: {latest.name}")
+
+        return latest
+
+    def extract_stage2_only(
+        self,
+        task_id: str,
+        base_dir: str = r"E:\programFile\AIProgram\tender_ontology\static\upload",
+        max_workers: int = 4,
+        verbose: bool = True
+    ) -> Dict[str, Any]:
+        """
+        直接进行二阶段提取（跳过一阶段，使用已有的一阶段结果）
+
+        Args:
+            task_id: 任务ID
+            base_dir: 上传目录基础路径
+            max_workers: 章节并发数
+            verbose: 是否打印详细信息
+
+        Returns:
+            {
+                "chapter_headings": [...],  # 从一阶段解析出的章节标题
+                "chapter_results": [...],   # 各章节的层级结果
+                "all_headings": [...],      # 合并后的所有标题
+                "stage2_time": float        # 二阶段耗时(秒)
+            }
+        """
+        stage2_start = time.time()
+        task_dir = Path(base_dir) / task_id
+
+        if verbose:
+            print(f"{'=' * 80}")
+            print(f"[二阶段提取] 直接进行二阶段提取")
+            print(f"{'=' * 80}")
+            print(f"任务ID: {task_id}")
+            print(f"任务目录: {task_dir}\n")
+
+        # 1. 查找最新的一阶段 markdown
+        stage1_md_path = self.find_latest_stage1_markdown(task_dir, verbose)
+        if not stage1_md_path:
+            raise FileNotFoundError(f"未找到一阶段 markdown 文件，请先运行一阶段提取")
+
+        # 2. 解析一阶段 markdown，提取章节标题
+        stage1_content = stage1_md_path.read_text(encoding='utf-8')
+        chapter_headings = self.parse_stage1_markdown(stage1_content, verbose)
+
+        if not chapter_headings:
+            raise ValueError(f"一阶段 markdown 中未找到章节标题 (type=chapter)")
+
+        # 3. 查找 title_with_id.md 文件
+        title_files = list(task_dir.glob("*_title_with_id.md"))
+        if not title_files:
+            raise FileNotFoundError(f"未找到 title_with_id.md 文件")
+        title_file = title_files[0]
+
+        if verbose:
+            print(f"[二阶段提取] 一阶段文件: {stage1_md_path.name}")
+            print(f"[二阶段提取] 章节标题数: {len(chapter_headings)}")
+            print(f"[二阶段提取] 标题文件: {title_file.name}\n")
+
+        # 4. 并发章节层级重建
+        if verbose:
+            print(f"[二阶段提取] 开始并发章节层级重建...")
+
+        chapter_results = self.extract_headings_by_chapters(
+            str(title_file),
+            chapter_headings,
+            max_workers=max_workers,
+            verbose=verbose,
+            save_responses=True
+        )
+
+        # 合并所有标题
+        all_headings = []
+        for result in chapter_results:
+            all_headings.extend(result.get("headings", []))
+
+        stage2_time = time.time() - stage2_start
+
+        if verbose:
+            print(f"\n{'=' * 80}")
+            print(f"[二阶段提取] 完成！")
+            print(f"  - 章节数: {len(chapter_results)} 个")
+            print(f"  - 总标题数: {len(all_headings)} 个")
+            print(f"{'=' * 80}")
+            print(f"[耗时统计]")
+            print(f"  - 阶段2 (章节并发重建): {stage2_time:.2f} 秒")
+            print(f"{'=' * 80}")
+
+        return {
+            "chapter_headings": chapter_headings,
+            "chapter_results": chapter_results,
+            "all_headings": all_headings,
+            "stage2_time": stage2_time
+        }
+
+    def _build_chapter_prompt(self) -> str:
+        """
+        构建章节内标题层级重建的提示词
+
+        Returns:
+            提示词字符串
+        """
+        prompt = """/no_think
+你是一个专业的文档结构分析引擎，负责识别章节内的标题层级结构。
+
+## 任务说明
+分析给定的**单个章节**内容，识别其中所有的标题并确定层级关系。
+
+## 关键约束（必须遵守）
+1. **整个输入内容属于同一个章节**，章节标题（第X章）是唯一的顶层标题
+2. **只能有一个 `#` 一级标题**，就是章节标题本身
+3. **章节内的所有其他标题都是该章节的后代**，必须从 `##` 开始，绝对不能出现第二个 `#`
+
+## 层级判断规则
+
+### 第一步：根据数字序号快速识别候选标题并排序
+标题通常带有数字序号，如：
+- 中文数字：一、二、三、（一）（二）（三）
+- 阿拉伯数字：1. 2. 3.、(1) (2) (3)、1) 2) 3)
+- 其他格式：第X节、① ② ③ 等
+
+根据序号的嵌套关系确定层级，例如：
+- "一、" 下面出现 "1."，则 "1." 是 "一、" 的子标题
+- "1." 下面出现 "(1)"，则 "(1)" 是 "1." 的子标题
+
+### 第二步：对难以直接区分的标题，结合语义和上下文确认
+- 无序号标题（如"重要提示"、"备注"、"说明"）：根据它们在文档中的位置和前后标题的关系判断层级
+- 序号格式相近时：结合标题的语义内容和上下文关系确定
+
+## 输出要求
+1. 仅在 ```markdown``` 代码块中返回识别到的标题
+2. **必须保留每个标题后的 {id=...} 标识符**，原样附在标题行末尾
+3. 层级必须连续，不能跳级
+4. 保持标题在原文中的顺序
+5. **只输出一个 `#` 一级标题**
+
+## 输出示例
+```markdown
+# 第一章 招标公告 {id=texts-100}
+## 一、项目概况 {id=texts-105}
+### 1. 项目名称 {id=texts-106}
+### 2. 项目编号 {id=texts-107}
+## 二、投标人资格要求 {id=texts-120}
+### 1. 基本资格条件 {id=texts-121}
+#### (1) 具体要求 {id=texts-122}
+## 备注 {id=texts-135}
+```
+
+现在，请分析以下章节内容，识别所有标题及其层级。"""
+
+        return prompt
+
+    def split_by_chapters(
+        self,
+        title_md_content: str,
+        chapter_headings: List[Dict[str, Any]],
+        verbose: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        根据章节标题锚点切分 title_with_id.md 内容
+
+        Args:
+            title_md_content: title_with_id.md 的完整内容
+            chapter_headings: 章节标题列表（type=chapter 的标题）
+            verbose: 是否打印详细信息
+
+        Returns:
+            章节列表，每个章节包含 {id, text, content, start_line, end_line}
+        """
+        lines = title_md_content.split('\n')
+
+        # 提取所有章节的 id 和位置
+        chapter_positions = []
+        id_pattern = re.compile(r'\{id=([^}]+)\}')
+
+        for i, line in enumerate(lines):
+            id_match = id_pattern.search(line)
+            if id_match:
+                line_id = id_match.group(1)
+                # 检查是否是章节标题
+                for ch in chapter_headings:
+                    if ch.get("id") == line_id:
+                        chapter_positions.append({
+                            "id": line_id,
+                            "text": ch.get("text", ""),
+                            "line_index": i
+                        })
+                        break
+
+        if verbose:
+            print(f"[章节切分] 找到 {len(chapter_positions)} 个章节锚点")
+
+        # 切分章节内容
+        chapters = []
+        for i, ch_pos in enumerate(chapter_positions):
+            start_line = ch_pos["line_index"]
+            # 下一个章节的起始位置，或文件末尾
+            end_line = chapter_positions[i + 1]["line_index"] if i + 1 < len(chapter_positions) else len(lines)
+
+            chapter_content = '\n'.join(lines[start_line:end_line])
+
+            chapters.append({
+                "id": ch_pos["id"],
+                "text": ch_pos["text"],
+                "content": chapter_content,
+                "start_line": start_line,
+                "end_line": end_line,
+                "line_count": end_line - start_line
+            })
+
+            if verbose:
+                print(f"  - {ch_pos['text'][:30]}... ({end_line - start_line} 行)")
+
+        return chapters
+
+    def _create_internal_ai_client(self) -> AIClient:
+        """
+        创建指向内部 qwen3-32b API 的 AIClient
+
+        Returns:
+            配置好的 AIClient 实例
+        """
+        return AIClient(
+            model_name=self.INTERNAL_MODEL,
+            base_url=self.INTERNAL_API_URL.replace("/v1/chat/completions", "/v1"),
+            api_key="not-needed",  # 内部 API 不需要 key
+            temperature=0.0,
+            top_p=0.7,
+            repetition_penalty=1.05,
+            max_tokens=8192,
+            timeout=120.0
+        )
+
+    def _parse_chapter_response(self, response_text: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        解析章节标题提取的响应（供 BatchProcessor 使用）
+
+        Args:
+            response_text: API 响应文本
+            context: 上下文信息（包含 chapter_id, chapter_text）
+
+        Returns:
+            解析后的结果
+        """
+        headings = self._parse_response(response_text)
+        return {
+            "chapter_id": context.get("chapter_id"),
+            "chapter_text": context.get("chapter_text"),
+            "headings": headings,
+            "raw_response": response_text
+        }
+
+    def _merge_chapter_results(self, all_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        合并章节结果（供 BatchProcessor 使用）
+
+        Args:
+            all_results: 所有批次的结果
+
+        Returns:
+            合并后的结果列表（保持原顺序）
+        """
+        # BatchProcessor 已经保序，直接返回
+        return all_results
+
+    def extract_headings_by_chapters(
+        self,
+        title_md_path: str,
+        chapter_headings: List[Dict[str, Any]],
+        max_workers: int = 8,
+        verbose: bool = True,
+        save_responses: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        根据章节并发提取标题层级（使用 BatchProcessor）
+
+        Args:
+            title_md_path: title_with_id.md 文件路径
+            chapter_headings: 章节标题列表（从第一次调用获取的 type=chapter 标题）
+            max_workers: 最大并发数
+            verbose: 是否打印详细信息
+            save_responses: 是否保存各章节的响应
+
+        Returns:
+            所有章节的标题结果列表
+        """
+        title_md_path = Path(title_md_path)
+
+        # 读取文件
+        try:
+            content = title_md_path.read_text(encoding='utf-8')
+        except Exception as e:
+            if verbose:
+                print(f"[章节重建] 读取文件失败: {e}")
+            return []
+
+        # 切分章节
+        chapters = self.split_by_chapters(content, chapter_headings, verbose)
+
+        if not chapters:
+            if verbose:
+                print(f"[章节重建] 未找到任何章节")
+            return []
+
+        if verbose:
+            print(f"\n[章节重建] 开始并发处理 {len(chapters)} 个章节 (max_workers={max_workers})")
+
+        # 创建内部 API 客户端
+        ai_client = self._create_internal_ai_client()
+
+        # 创建 BatchProcessor
+        batch_processor = BatchProcessor(
+            ai_client=ai_client,
+            verbose=verbose,
+            max_workers=max_workers
+        )
+
+        # 构建批次列表: (system_prompt, user_prompt, context)
+        system_prompt = self._build_chapter_prompt()
+        batches = []
+        for chapter in chapters:
+            user_prompt = f"请分析以下章节内容，识别所有标题及其层级：\n\n{chapter['content']}"
+            context = {
+                "chapter_id": chapter.get("id"),
+                "chapter_text": chapter.get("text", "")
+            }
+            batches.append((system_prompt, user_prompt, context))
+
+        # 使用 BatchProcessor 并发处理
+        try:
+            results = batch_processor.process_batches(
+                batches=batches,
+                parse_response_func=self._parse_chapter_response,
+                merge_results_func=self._merge_chapter_results,
+                parallel=True
+            )
+        except Exception as e:
+            if verbose:
+                print(f"[章节重建] BatchProcessor 处理失败: {e}")
+            return []
+
+        if verbose:
+            total_headings = sum(len(r.get("headings", [])) for r in results)
+            print(f"\n[章节重建] 完成！共处理 {len(results)} 个章节，提取 {total_headings} 个标题")
+
+        return results
+
+    def extract_full_hierarchy(
+        self,
+        sectionheader_only_path: str,
+        title_md_path: str,
+        max_workers: int = 4,
+        verbose: bool = True
+    ) -> Dict[str, Any]:
+        """
+        完整的两阶段标题层级提取
+
+        阶段1: 提取一二级标题（章节）
+        阶段2: 并发对每个章节做层级重建
+
+        Args:
+            sectionheader_only_path: sectionHeader_only.md 文件路径
+            title_md_path: title_with_id.md 文件路径
+            max_workers: 章节并发数
+            verbose: 是否打印详细信息
+
+        Returns:
+            {
+                "level12_headings": [...],  # 一二级标题
+                "chapter_results": [...],   # 各章节的层级结果
+                "all_headings": [...]       # 合并后的所有标题
+                "stage1_time": float,       # 阶段1耗时(秒)
+                "stage2_time": float,       # 阶段2耗时(秒)
+                "total_time": float         # 总耗时(秒)
+            }
+        """
+        total_start = time.time()
+
+        if verbose:
+            print(f"{'=' * 80}")
+            print(f"[完整层级提取] 开始两阶段提取")
+            print(f"{'=' * 80}\n")
+
+        # 阶段1: 提取一二级标题
+        stage1_start = time.time()
+        if verbose:
+            print(f"[阶段1] 提取一二级标题...")
+
+        level12_headings = self.extract_headings_internal(
+            sectionheader_only_path,
+            verbose=verbose,
+            save_response=True
+        )
+
+        # 筛选出 type=chapter 的标题作为锚点
+        chapter_headings = []
+        chapter_pattern = re.compile(r'第[一二三四五六七八九十\d]+章')
+
+        for h in level12_headings:
+            if chapter_pattern.search(h.get("text", "")):
+                chapter_headings.append(h)
+
+        stage1_time = time.time() - stage1_start
+
+        if verbose:
+            print(f"\n[阶段1] 完成！找到 {len(level12_headings)} 个一二级标题，其中 {len(chapter_headings)} 个章节标题")
+            print(f"[阶段1] 耗时: {stage1_time:.2f} 秒\n")
+
+        # 阶段2: 并发章节层级重建
+        stage2_start = time.time()
+        if verbose:
+            print(f"[阶段2] 并发章节层级重建...")
+
+        chapter_results = self.extract_headings_by_chapters(
+            title_md_path,
+            chapter_headings,
+            max_workers=max_workers,
+            verbose=verbose,
+            save_responses=True
+        )
+
+        stage2_time = time.time() - stage2_start
+
+        # 合并所有标题
+        all_headings = []
+        for result in chapter_results:
+            all_headings.extend(result.get("headings", []))
+
+        total_time = time.time() - total_start
+
+        if verbose:
+            print(f"\n{'=' * 80}")
+            print(f"[完整层级提取] 完成！")
+            print(f"  - 一二级标题: {len(level12_headings)} 个")
+            print(f"  - 章节数: {len(chapter_results)} 个")
+            print(f"  - 总标题数: {len(all_headings)} 个")
+            print(f"{'=' * 80}")
+            print(f"[耗时统计]")
+            print(f"  - 阶段1 (一二级标题提取): {stage1_time:.2f} 秒")
+            print(f"  - 阶段2 (章节并发重建): {stage2_time:.2f} 秒")
+            print(f"  - 总耗时: {total_time:.2f} 秒")
+            print(f"{'=' * 80}")
+
+        return {
+            "level12_headings": level12_headings,
+            "chapter_results": chapter_results,
+            "all_headings": all_headings,
+            "stage1_time": stage1_time,
+            "stage2_time": stage2_time,
+            "total_time": total_time
+        }
+
+
+if __name__ == "__main__":
+    """
+    直接运行测试：两阶段标题层级提取
+
+    用法：
+        # 完整两阶段提取（默认）
+        python src/tender_ontology/services/docling/qwen_heading_extractor_file.py
+
+        # 仅运行二阶段提取（使用已有的一阶段结果）
+        python src/tender_ontology/services/docling/qwen_heading_extractor_file.py --stage2-only
+
+        # 指定任务ID
+        python src/tender_ontology/services/docling/qwen_heading_extractor_file.py --task-id 25112719364823166528
+
+        # 组合使用
+        python src/tender_ontology/services/docling/qwen_heading_extractor_file.py --stage2-only --task-id xxx
+    """
+    import json
+    import argparse
+
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description="两阶段标题层级提取")
+    parser.add_argument(
+        "--stage2-only",
+        action="store_true",
+        help="仅运行二阶段提取（跳过一阶段，使用已有的一阶段 markdown 结果）"
+    )
+    parser.add_argument(
+        "--task-id",
+        type=str,
+        default="25112719364823166528",
+        help="任务ID（默认：25112719364823166528）"
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=8,
+        help="章节并发数（默认：8）"
+    )
+    args = parser.parse_args()
+
+    TASK_ID = args.task_id
+    BASE_DIR = Path(r"E:\programFile\AIProgram\tender_ontology\static\upload") / TASK_ID
+
+    # 创建提取器
+    extractor = QwenHeadingExtractor()
+
+    try:
+        if args.stage2_only:
+            # ========== 仅运行二阶段提取 ==========
+            print(f"[模式] 仅运行二阶段提取（使用已有的一阶段结果）\n")
+
+            result = extractor.extract_stage2_only(
+                task_id=TASK_ID,
+                max_workers=args.max_workers,
+                verbose=True
+            )
+
+            result_path = BASE_DIR / "stage2_hierarchy_result.md"
+
+        else:
+            # ========== 完整两阶段提取 ==========
+            # 查找需要的文件
+            header_files = list(BASE_DIR.glob("*_sectionHeader_only.md"))
+            title_files = list(BASE_DIR.glob("*_title_with_id.md"))
+
+            if not header_files:
+                print(f"[测试] 未找到 sectionHeader_only.md 文件在目录: {BASE_DIR}")
+                exit(1)
+
+            if not title_files:
+                print(f"[测试] 未找到 title_with_id.md 文件在目录: {BASE_DIR}")
+                exit(1)
+
+            sectionheader_file = header_files[0]
+            title_file = title_files[0]
+
+            print(f"{'=' * 80}")
+            print(f"[测试] 完整两阶段标题层级提取")
+            print(f"{'=' * 80}")
+            print(f"任务ID: {TASK_ID}")
+            print(f"阶段1输入: {sectionheader_file.name}")
+            print(f"阶段2输入: {title_file.name}")
+            print(f"{'=' * 80}\n")
+
+            result = extractor.extract_full_hierarchy(
+                str(sectionheader_file),
+                str(title_file),
+                max_workers=args.max_workers,
+                verbose=True
+            )
+
+            result_path = BASE_DIR / "full_hierarchy_result.md"
+
+        # 将结果合并为 markdown 格式
+        md_lines = []
+        for h in result["all_headings"]:
+            level = h.get("level", 0)
+            text = h.get("text", "")
+            node_id = h.get("id", "")
+            prefix = "#" * level
+            md_lines.append(f"{prefix} {text} {{id={node_id}}}")
+
+        md_content = "\n".join(md_lines)
+
+        # 保存 markdown 结果
+        result_path.write_text(md_content, encoding='utf-8')
+        print(f"\n[测试] 完整结果已保存: {result_path.name}")
+
+        # 打印所有标题层级
+        print(f"\n{'=' * 80}")
+        print(f"[测试] 完整标题层级树")
+        print(f"{'=' * 80}\n")
+        print(md_content)
+
+    except Exception as e:
+        print(f"\n[测试] 提取失败: {e}")
+        import traceback
+        traceback.print_exc()
