@@ -78,39 +78,39 @@ class DoclingBackgroundTask:
                 header_count = sum(1 for item in fulltext_data if item.get("label") == "section_header")
                 print(f"[Docling Task] fulltext.json 中共有 {header_count} 个标题")
 
-            # 并行执行两个千问调用
-            if fulltext_data and "title_md_path" in results and "header_only_path" in results:
-                from concurrent.futures import ThreadPoolExecutor, as_completed
+            # 调用千问 API（暂时只调用第一个，level12 已注释）
+            if fulltext_data and "title_md_path" in results:
+                print(f"[Docling Task] 开始调用千问 API...")
 
-                print(f"[Docling Task] 开始并行调用千问 API...")
-
-                with ThreadPoolExecutor(max_workers=2) as executor:
-                    # 提交两个任务
-                    future_all_headings = executor.submit(
-                        self._extract_all_headings,
+                # 调用1：提取所有标题层级
+                try:
+                    result_data = self._extract_all_headings(
                         results["title_md_path"],
                         header_count,
                         fulltext_data
                     )
-                    future_level12 = executor.submit(
-                        self._extract_level12_headings,
-                        results["header_only_path"],
-                        fulltext_data
-                    )
+                    if result_data:
+                        artifacts.update(result_data)
+                except Exception as e:
+                    print(f"[Docling Task] 千问调用异常: {e}")
+                    import traceback
+                    traceback.print_exc()
 
-                    # 等待两个任务完成
-                    for future in as_completed([future_all_headings, future_level12]):
-                        try:
-                            result_data = future.result()
-                            if result_data:
-                                # 合并结果到 artifacts
-                                artifacts.update(result_data)
-                        except Exception as e:
-                            print(f"[Docling Task] 千问调用异常: {e}")
-                            import traceback
-                            traceback.print_exc()
+                # 调用2：提取一二级标题（暂时注释，API 配额不足）
+                # if "header_only_path" in results:
+                #     try:
+                #         result_data = self._extract_level12_headings(
+                #             results["header_only_path"],
+                #             fulltext_data
+                #         )
+                #         if result_data:
+                #             artifacts.update(result_data)
+                #     except Exception as e:
+                #         print(f"[Docling Task] 千问调用2异常: {e}")
+                #         import traceback
+                #         traceback.print_exc()
 
-                print(f"[Docling Task] 千问 API 并行调用完成")
+                print(f"[Docling Task] 千问 API 调用完成")
 
             # 4. 更新数据库状态为"完成"
             if db_task_id:
@@ -421,7 +421,7 @@ class DoclingBackgroundTask:
         artifacts: Optional[Dict[str, Any]] = None
     ):
         """
-        更新数据库中的任务状态
+        更新数据库/存储中的任务状态
 
         Args:
             task_id: 数据库任务 ID
@@ -434,33 +434,50 @@ class DoclingBackgroundTask:
             artifacts: 生成的文件信息
         """
         try:
-            from tender_ontology.utils.db.mysql import get_db
-            from tender_ontology.utils.db.mysql.models import ComplianceFileTask
+            from tender_ontology.utils.db.local_storage import is_local_mode, get_local_storage
 
-            # 使用全局数据库连接池
-            mysql = get_db()
+            if is_local_mode():
+                # 本地存储模式
+                storage = get_local_storage()
+                storage.update_task_status(task_id, status, message)
+                print(f"[Docling Task] Task {task_id} status updated to {status} (local)")
 
-            with mysql.get_session() as session:
-                task = session.query(ComplianceFileTask).filter(
-                    ComplianceFileTask.id == task_id
-                ).first()
+                # 打印 artifacts 信息
+                if artifacts and status == 2:
+                    print(f"[Docling Task] Artifacts generated:")
+                    print(f"  - Headers: {artifacts.get('headers', {}).get('total_headers', 0)} items")
+                    print(f"  - Labeled: {artifacts.get('labeled', {}).get('total_items', 0)} items")
+                    print(f"  - Model Headings: {artifacts.get('model', {}).get('total_headings', 0)} items")
+                    print(f"  - Files: {artifacts.get('headers', {}).get('path')}")
+            else:
+                # MySQL 模式
+                from tender_ontology.utils.db.mysql import get_db
+                from tender_ontology.utils.db.mysql.models import ComplianceFileTask
 
-                if task:
-                    task.review_status = status
-                    task.update_time = datetime.now()
+                # 使用全局数据库连接池
+                mysql = get_db()
 
-                    # review_result 是整数类型，只存储简单的结果码
-                    # artifacts 信息只打印日志，不存储到数据库
-                    if artifacts and status == 2:
-                        print(f"[Docling Task] Artifacts generated:")
-                        print(f"  - Headers: {artifacts.get('headers', {}).get('total_headers', 0)} items")
-                        print(f"  - Labeled: {artifacts.get('labeled', {}).get('total_items', 0)} items")
-                        print(f"  - Model Headings: {artifacts.get('model', {}).get('total_headings', 0)} items")
-                        print(f"  - Files: {artifacts.get('headers', {}).get('path')}")
-                        # 如果需要存储 artifacts，可以考虑添加新的 TEXT/JSON 字段
+                with mysql.get_session() as session:
+                    task = session.query(ComplianceFileTask).filter(
+                        ComplianceFileTask.id == task_id
+                    ).first()
 
-                    session.commit()
-                    print(f"[Docling Task] Task {task_id} status updated to {status}")
+                    if task:
+                        task.review_status = status
+                        task.update_time = datetime.now()
+
+                        # review_result 是整数类型，只存储简单的结果码
+                        # artifacts 信息只打印日志，不存储到数据库
+                        if artifacts and status == 2:
+                            print(f"[Docling Task] Artifacts generated:")
+                            print(f"  - Headers: {artifacts.get('headers', {}).get('total_headers', 0)} items")
+                            print(f"  - Labeled: {artifacts.get('labeled', {}).get('total_items', 0)} items")
+                            print(f"  - Model Headings: {artifacts.get('model', {}).get('total_headings', 0)} items")
+                            print(f"  - Files: {artifacts.get('headers', {}).get('path')}")
+                            # 如果需要存储 artifacts，可以考虑添加新的 TEXT/JSON 字段
+
+                        session.commit()
+                        print(f"[Docling Task] Task {task_id} status updated to {status}")
 
         except Exception as e:
             print(f"[Docling Task] Failed to update task status: {e}")

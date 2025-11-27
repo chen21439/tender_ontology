@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from tender_ontology.routers import health, ontology, pdf_upload
-from tender_ontology.utils.db.mysql import init_db, close_db
+from tender_ontology.utils.db.local_storage import is_local_mode
 
 
 @asynccontextmanager
@@ -18,15 +18,25 @@ async def lifespan(app: FastAPI):
     """
     应用生命周期管理
 
-    启动时初始化数据库连接池，关闭时释放
+    启动时初始化数据库连接池（仅在 MySQL 模式），关闭时释放
     """
-    # 启动时：初始化数据库连接池
-    init_db()
+    if is_local_mode():
+        # 本地模式：使用 JSON 文件存储，不需要数据库
+        print("[Startup] Running in LOCAL storage mode (using JSON file)")
+        from tender_ontology.utils.db.local_storage import get_local_storage
+        get_local_storage()  # 初始化本地存储
+    else:
+        # MySQL 模式：初始化数据库连接池
+        print("[Startup] Running in MySQL storage mode")
+        from tender_ontology.utils.db.mysql import init_db, close_db
+        init_db()
 
     yield
 
-    # 关闭时：释放数据库连接池
-    close_db()
+    # 关闭时：释放数据库连接池（仅在 MySQL 模式）
+    if not is_local_mode():
+        from tender_ontology.utils.db.mysql import close_db
+        close_db()
 
 
 app = FastAPI(
