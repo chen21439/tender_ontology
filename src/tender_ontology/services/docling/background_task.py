@@ -78,37 +78,37 @@ class DoclingBackgroundTask:
                 header_count = sum(1 for item in fulltext_data if item.get("label") == "section_header")
                 print(f"[Docling Task] fulltext.json 中共有 {header_count} 个标题")
 
-            # 调用千问 API（暂时只调用第一个，level12 已注释）
+            # 调用千问 API
             if fulltext_data and "title_md_path" in results:
                 print(f"[Docling Task] 开始调用千问 API...")
 
-                # 调用1：提取所有标题层级
-                try:
-                    result_data = self._extract_all_headings(
-                        results["title_md_path"],
-                        header_count,
-                        fulltext_data
-                    )
-                    if result_data:
-                        artifacts.update(result_data)
-                except Exception as e:
-                    print(f"[Docling Task] 千问调用异常: {e}")
-                    import traceback
-                    traceback.print_exc()
+                # 调用1：提取所有标题层级（暂时禁用，恢复时取消注释即可）
+                # try:
+                #     result_data = self._extract_all_headings(
+                #         results["title_md_path"],
+                #         header_count,
+                #         fulltext_data
+                #     )
+                #     if result_data:
+                #         artifacts.update(result_data)
+                # except Exception as e:
+                #     print(f"[Docling Task] 千问调用异常: {e}")
+                #     import traceback
+                #     traceback.print_exc()
 
-                # 调用2：提取一二级标题（暂时注释，API 配额不足）
-                # if "header_only_path" in results:
-                #     try:
-                #         result_data = self._extract_level12_headings(
-                #             results["header_only_path"],
-                #             fulltext_data
-                #         )
-                #         if result_data:
-                #             artifacts.update(result_data)
-                #     except Exception as e:
-                #         print(f"[Docling Task] 千问调用2异常: {e}")
-                #         import traceback
-                #         traceback.print_exc()
+                # 调用2：提取一二级标题（使用内部qwen3-32b API）
+                if "header_only_path" in results:
+                    try:
+                        result_data = self._extract_level12_headings(
+                            results["header_only_path"],
+                            fulltext_data
+                        )
+                        if result_data:
+                            artifacts.update(result_data)
+                    except Exception as e:
+                        print(f"[Docling Task] 千问调用2异常: {e}")
+                        import traceback
+                        traceback.print_exc()
 
                 print(f"[Docling Task] 千问 API 调用完成")
 
@@ -286,7 +286,7 @@ class DoclingBackgroundTask:
         fulltext_data: list
     ) -> Optional[Dict[str, Any]]:
         """
-        提取一二级标题（千问调用2）
+        提取一二级标题（千问调用2，使用内部qwen3-32b API）
 
         Args:
             header_only_path: sectionHeader_only.md 文件路径
@@ -301,10 +301,12 @@ class DoclingBackgroundTask:
             print(f"[Qwen API 2] 开始提取一二级标题...")
 
             extractor = QwenHeadingExtractor()
-            level12_headings = extractor.extract_headings(
+            # 使用内部32b API，自动保存完整响应到 {base_name}_level12_response.json
+            level12_headings = extractor.extract_headings_internal(
                 header_only_path,
                 header_count=0,
-                verbose=True
+                verbose=True,
+                save_response=True
             )
             print(f"[Qwen API 2] 提取完成，共 {len(level12_headings)} 个标题")
 
