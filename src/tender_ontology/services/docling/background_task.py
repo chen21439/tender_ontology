@@ -96,11 +96,12 @@ class DoclingBackgroundTask:
                 #     import traceback
                 #     traceback.print_exc()
 
-                # 调用2：提取一二级标题（使用内部qwen3-32b API）
-                if "header_only_path" in results:
+                # 调用2：两阶段标题提取（使用内部qwen3-32b API）
+                if "header_only_path" in results and "title_md_path" in results:
                     try:
                         result_data = self._extract_level12_headings(
                             results["header_only_path"],
+                            results["title_md_path"],
                             fulltext_data
                         )
                         if result_data:
@@ -283,37 +284,46 @@ class DoclingBackgroundTask:
     def _extract_level12_headings(
         self,
         header_only_path: str,
+        title_md_path: str,
         fulltext_data: list
     ) -> Optional[Dict[str, Any]]:
         """
-        提取一二级标题（千问调用2，使用内部qwen3-32b API）
+        两阶段标题提取（千问调用2，使用内部qwen3-32b API）
+
+        阶段1：提取一二级标题（volume/chapter）
+        阶段2：并发提取各章节内的子标题，聚合后构建完整树
 
         Args:
             header_only_path: sectionHeader_only.md 文件路径
+            title_md_path: title_with_id.md 文件路径
             fulltext_data: fulltext 数据
 
         Returns:
             artifacts 字典
         """
         try:
-            from .qwen_heading_extractor import QwenHeadingExtractor
+            from .qwen_heading_extractor_file import QwenHeadingExtractor
+            import re
+            import time
 
-            print(f"[Qwen API 2] 开始提取一二级标题...")
+            total_start = time.time()
+            print(f"[Qwen API 2] 开始两阶段标题提取...")
 
             extractor = QwenHeadingExtractor()
-            # 使用内部32b API，自动保存完整响应到 {base_name}_level12_response.json
+
+            # ========== 阶段1：提取一二级标题 ==========
+            stage1_start = time.time()
+            print(f"[Qwen API 2] 阶段1：提取一二级标题...")
             level12_headings = extractor.extract_headings_internal(
                 header_only_path,
                 header_count=0,
                 verbose=True,
                 save_response=True
             )
-            print(f"[Qwen API 2] 提取完成，共 {len(level12_headings)} 个标题")
+            stage1_time = time.time() - stage1_start
+            print(f"[Qwen API 2] 阶段1完成，共 {len(level12_headings)} 个标题，耗时: {stage1_time:.2f} 秒")
 
-            # 填充位置信息
-            extractor.enrich_headings_with_location(level12_headings, fulltext_data, verbose=True)
-
-            # 保存结果
+            # 保存一阶段结果
             header_only_path = Path(header_only_path)
             base_name = header_only_path.stem.replace('_sectionHeader_only', '')
             output_dir = header_only_path.parent
@@ -325,12 +335,92 @@ class DoclingBackgroundTask:
             )
             print(f"[Qwen API 2] 一二级标题已保存: {level12_json_path.name}")
 
-            return {
+            artifacts = {
                 "level12": {
                     "path": str(level12_json_path),
                     "total_headings": len(level12_headings)
                 }
             }
+
+            # ========== 阶段2：并发提取章节内子标题 ==========
+            # 筛选出 chapter 标题
+            chapter_pattern = re.compile(r'第[一二三四五六七八九十\d]+章')
+            chapter_headings = [
+                h for h in level12_headings
+                if chapter_pattern.search(h.get("text", ""))
+            ]
+
+            if chapter_headings:
+                stage2_start = time.time()
+                print(f"[Qwen API 2] 阶段2：并发提取 {len(chapter_headings)} 个章节的子标题...")
+
+                chapter_results = extractor.extract_headings_by_chapters(
+                    title_md_path,
+                    chapter_headings,
+                    max_workers=8,
+                    verbose=True,
+                    save_responses=False
+                )
+
+                # ========== 聚合结果（复用 extractor 的方法） ==========
+                all_headings = extractor.merge_stage2_results(
+                    level12_headings,
+                    chapter_results,
+                    verbose=True
+                )
+                stage2_time = time.time() - stage2_start
+                print(f"[Qwen API 2] 阶段2完成，聚合后共 {len(all_headings)} 个标题，耗时: {stage2_time:.2f} 秒")
+
+                # 填充位置信息
+                extractor.enrich_headings_with_location(all_headings, fulltext_data, verbose=True)
+
+                # 保存聚合后的标题
+                agent_headings_path = output_dir / f"{base_name}_agent_headings.json"
+                agent_headings_path.write_text(
+                    json.dumps(all_headings, ensure_ascii=False, indent=2),
+                    encoding='utf-8'
+                )
+                print(f"[Qwen API 2] 聚合标题已保存: {agent_headings_path.name}")
+
+                # ========== 构建文档树（复用 extractor 的方法） ==========
+                print(f"[Qwen API 2] 开始构建文档层级树...")
+                tree_result = extractor.build_document_tree(all_headings, fulltext_data, verbose=True)
+
+                if tree_result:
+                    # 保存 _agent_tree.json
+                    tree_json_path = output_dir / f"{base_name}_agent_tree.json"
+                    tree_json_path.write_text(
+                        json.dumps(tree_result, ensure_ascii=False, indent=2),
+                        encoding='utf-8'
+                    )
+                    print(f"[Qwen API 2] 文档树已保存: {tree_json_path.name}")
+                    artifacts["agent_tree"] = {
+                        "path": str(tree_json_path),
+                        "summary": tree_result["summary"]
+                    }
+
+                    # 保存 _agent.json（和 _forward.json 格式相同）
+                    if "artifact" in tree_result:
+                        agent_json_path = output_dir / f"{base_name}_agent.json"
+                        agent_json_path.write_text(
+                            json.dumps(tree_result["artifact"], ensure_ascii=False, indent=2),
+                            encoding='utf-8'
+                        )
+                        print(f"[Qwen API 2] Agent JSON 已保存: {agent_json_path.name}")
+                        artifacts["agent"] = {"path": str(agent_json_path)}
+
+                # 打印耗时统计
+                total_time = time.time() - total_start
+                print(f"\n{'=' * 60}")
+                print(f"[Qwen API 2] 两阶段标题提取完成！")
+                print(f"{'=' * 60}")
+                print(f"[耗时统计]")
+                print(f"  - 阶段1 (一二级标题提取): {stage1_time:.2f} 秒")
+                print(f"  - 阶段2 (章节并发重建+聚合): {stage2_time:.2f} 秒")
+                print(f"  - 总耗时: {total_time:.2f} 秒")
+                print(f"{'=' * 60}")
+
+            return artifacts
 
         except Exception as e:
             print(f"[Qwen API 2] 提取失败: {e}")

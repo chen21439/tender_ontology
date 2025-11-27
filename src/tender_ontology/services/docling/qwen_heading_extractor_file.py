@@ -730,12 +730,130 @@ class QwenHeadingExtractor:
 
         return latest
 
+    def merge_stage2_results(
+        self,
+        level12_headings: List[Dict[str, Any]],
+        chapter_results: List[Dict[str, Any]],
+        verbose: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        聚合二阶段结果
+
+        将章节内的子标题挂载到正确的层级：
+        - 如果存在 volume（册），chapter 的 level=2，子标题从 level=3 开始
+        - 如果不存在 volume，chapter 的 level=1，子标题从 level=2 开始
+
+        Args:
+            level12_headings: 一阶段返回的一二级标题
+            chapter_results: 二阶段返回的各章节结果
+            verbose: 是否打印详细信息
+
+        Returns:
+            聚合后的完整标题列表
+        """
+        # 检查是否存在 volume（册/部分/节）
+        volume_pattern = re.compile(r'第[一二三四五六七八九十\d]+[册部分节]')
+        has_volume = any(
+            volume_pattern.search(h.get("text", ""))
+            for h in level12_headings
+        )
+
+        if verbose:
+            print(f"[聚合] 是否存在 volume 结构: {has_volume}")
+
+        # 构建 chapter_id -> 原始 level 的映射
+        chapter_pattern = re.compile(r'第[一二三四五六七八九十\d]+章')
+        chapter_level_map = {}
+        for h in level12_headings:
+            if chapter_pattern.search(h.get("text", "")):
+                chapter_level_map[h.get("id")] = h.get("level", 1)
+
+        # 聚合结果
+        all_headings = []
+        processed_chapter_ids = set()
+
+        for h in level12_headings:
+            node_id = h.get("id")
+
+            # 如果是 chapter，插入其子标题
+            if chapter_pattern.search(h.get("text", "")):
+                # 先添加 chapter 本身
+                all_headings.append(h)
+                processed_chapter_ids.add(node_id)
+
+                # 找到对应的二阶段结果
+                chapter_result = next(
+                    (r for r in chapter_results if r.get("chapter_id") == node_id),
+                    None
+                )
+
+                if chapter_result:
+                    chapter_original_level = chapter_level_map.get(node_id, 1)
+                    # 二阶段中 chapter 是 level=1，需要计算偏移量
+                    level_offset = chapter_original_level - 1
+
+                    # 添加子标题（跳过 chapter 本身，它已经添加了）
+                    for sub_h in chapter_result.get("headings", []):
+                        if sub_h.get("id") != node_id:
+                            # 调整 level
+                            adjusted_heading = sub_h.copy()
+                            adjusted_heading["level"] = sub_h.get("level", 1) + level_offset
+                            all_headings.append(adjusted_heading)
+
+                    if verbose:
+                        sub_count = len(chapter_result.get("headings", [])) - 1
+                        print(f"[聚合] {h.get('text', '')[:20]}... -> {sub_count} 个子标题 (offset={level_offset})")
+            else:
+                # 非 chapter 标题（volume 或其他），直接添加
+                all_headings.append(h)
+
+        if verbose:
+            print(f"[聚合] 总计 {len(all_headings)} 个标题")
+
+        return all_headings
+
+    def build_document_tree(
+        self,
+        model_headings: List[Dict[str, Any]],
+        fulltext_data: List[Dict[str, Any]],
+        verbose: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        """
+        使用 LevelTreeConstructor 构建文档层级树
+
+        Args:
+            model_headings: 标题列表（带 level）
+            fulltext_data: docling fulltext 数据（按阅读顺序）
+            verbose: 是否打印详细信息
+
+        Returns:
+            树结构和统计信息
+        """
+        try:
+            from tender_ontology.utils.document_struct.tree import LevelTreeConstructor
+
+            constructor = LevelTreeConstructor(verbose=verbose)
+            result = constructor.build_tree(model_headings, fulltext_data)
+
+            # 打印树结构预览（只显示标题）
+            if verbose:
+                constructor.print_tree(max_depth=4, show_non_headers=False)
+
+            return result
+        except Exception as e:
+            if verbose:
+                print(f"[构建树] 构建文档树失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def extract_stage2_only(
         self,
         task_id: str,
         base_dir: str = r"E:\programFile\AIProgram\tender_ontology\static\upload",
-        max_workers: int = 4,
-        verbose: bool = True
+        max_workers: int = 8,
+        verbose: bool = True,
+        build_tree: bool = True
     ) -> Dict[str, Any]:
         """
         直接进行二阶段提取（跳过一阶段，使用已有的一阶段结果）
@@ -745,15 +863,20 @@ class QwenHeadingExtractor:
             base_dir: 上传目录基础路径
             max_workers: 章节并发数
             verbose: 是否打印详细信息
+            build_tree: 是否构建文档树并保存 _agent.json
 
         Returns:
             {
                 "chapter_headings": [...],  # 从一阶段解析出的章节标题
                 "chapter_results": [...],   # 各章节的层级结果
                 "all_headings": [...],      # 合并后的所有标题
-                "stage2_time": float        # 二阶段耗时(秒)
+                "stage2_time": float,       # 二阶段耗时(秒)
+                "tree_result": {...},       # 树结构（如果 build_tree=True）
+                "agent_json_path": str      # _agent.json 路径（如果 build_tree=True）
             }
         """
+        import json
+
         stage2_start = time.time()
         task_dir = Path(base_dir) / task_id
 
@@ -782,12 +905,20 @@ class QwenHeadingExtractor:
             raise FileNotFoundError(f"未找到 title_with_id.md 文件")
         title_file = title_files[0]
 
+        # 4. 查找 _level12.json 获取一阶段完整结果
+        level12_files = list(task_dir.glob("*_level12.json"))
+        if not level12_files:
+            raise FileNotFoundError(f"未找到 _level12.json 文件")
+        level12_file = level12_files[0]
+        level12_headings = json.loads(level12_file.read_text(encoding='utf-8'))
+
         if verbose:
             print(f"[二阶段提取] 一阶段文件: {stage1_md_path.name}")
+            print(f"[二阶段提取] 一二级标题文件: {level12_file.name}")
             print(f"[二阶段提取] 章节标题数: {len(chapter_headings)}")
             print(f"[二阶段提取] 标题文件: {title_file.name}\n")
 
-        # 4. 并发章节层级重建
+        # 5. 并发章节层级重建
         if verbose:
             print(f"[二阶段提取] 开始并发章节层级重建...")
 
@@ -796,15 +927,81 @@ class QwenHeadingExtractor:
             chapter_headings,
             max_workers=max_workers,
             verbose=verbose,
-            save_responses=True
+            save_responses=False
         )
 
-        # 合并所有标题
-        all_headings = []
-        for result in chapter_results:
-            all_headings.extend(result.get("headings", []))
+        # 6. 聚合结果
+        if verbose:
+            print(f"\n[二阶段提取] 开始聚合结果...")
+
+        all_headings = self.merge_stage2_results(
+            level12_headings,
+            chapter_results,
+            verbose=verbose
+        )
 
         stage2_time = time.time() - stage2_start
+
+        result = {
+            "chapter_headings": chapter_headings,
+            "chapter_results": chapter_results,
+            "all_headings": all_headings,
+            "stage2_time": stage2_time
+        }
+
+        # 7. 构建文档树并保存 _agent.json
+        if build_tree:
+            if verbose:
+                print(f"\n[二阶段提取] 开始构建文档树...")
+
+            # 查找 fulltext.json
+            fulltext_files = list(task_dir.glob("*_fulltext.json"))
+            if fulltext_files:
+                fulltext_data = json.loads(fulltext_files[0].read_text(encoding='utf-8'))
+
+                # 填充位置信息
+                self.enrich_headings_with_location(all_headings, fulltext_data, verbose=verbose)
+
+                # 构建树
+                tree_result = self.build_document_tree(all_headings, fulltext_data, verbose=verbose)
+
+                if tree_result:
+                    result["tree_result"] = tree_result
+
+                    # 保存文件
+                    base_name = title_file.stem.replace('_title_with_id', '')
+
+                    # 保存 _agent_headings.json
+                    agent_headings_path = task_dir / f"{base_name}_agent_headings.json"
+                    agent_headings_path.write_text(
+                        json.dumps(all_headings, ensure_ascii=False, indent=2),
+                        encoding='utf-8'
+                    )
+                    if verbose:
+                        print(f"[二阶段提取] 聚合标题已保存: {agent_headings_path.name}")
+
+                    # 保存 _agent_tree.json
+                    tree_json_path = task_dir / f"{base_name}_agent_tree.json"
+                    tree_json_path.write_text(
+                        json.dumps(tree_result, ensure_ascii=False, indent=2),
+                        encoding='utf-8'
+                    )
+                    if verbose:
+                        print(f"[二阶段提取] 文档树已保存: {tree_json_path.name}")
+
+                    # 保存 _agent.json（和 _forward.json 格式相同）
+                    if "artifact" in tree_result:
+                        agent_json_path = task_dir / f"{base_name}_agent.json"
+                        agent_json_path.write_text(
+                            json.dumps(tree_result["artifact"], ensure_ascii=False, indent=2),
+                            encoding='utf-8'
+                        )
+                        if verbose:
+                            print(f"[二阶段提取] Agent JSON 已保存: {agent_json_path.name}")
+                        result["agent_json_path"] = str(agent_json_path)
+            else:
+                if verbose:
+                    print(f"[二阶段提取] 未找到 fulltext.json，跳过构建树")
 
         if verbose:
             print(f"\n{'=' * 80}")
@@ -813,15 +1010,10 @@ class QwenHeadingExtractor:
             print(f"  - 总标题数: {len(all_headings)} 个")
             print(f"{'=' * 80}")
             print(f"[耗时统计]")
-            print(f"  - 阶段2 (章节并发重建): {stage2_time:.2f} 秒")
+            print(f"  - 阶段2 (章节并发重建+聚合+构建树): {stage2_time:.2f} 秒")
             print(f"{'=' * 80}")
 
-        return {
-            "chapter_headings": chapter_headings,
-            "chapter_results": chapter_results,
-            "all_headings": all_headings,
-            "stage2_time": stage2_time
-        }
+        return result
 
     def _build_chapter_prompt(self) -> str:
         """
