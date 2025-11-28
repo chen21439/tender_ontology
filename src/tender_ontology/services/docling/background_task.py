@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime
 import json
+import requests
 
 from tender_ontology.services.docling import DoclingInferenceService
 
@@ -408,6 +409,13 @@ class DoclingBackgroundTask:
                         print(f"[Qwen API 2] Agent JSON 已保存: {agent_json_path.name}")
                         artifacts["agent"] = {"path": str(agent_json_path)}
 
+                        # 调用 extract_onto API 上报结构化数据
+                        self._call_extract_onto_api(
+                            task_id=output_dir.name,  # task_id 是目录名
+                            pdf_path=output_dir,  # 用于构建 pdf_url
+                            structured_data=tree_result["artifact"]
+                        )
+
                 # 打印耗时统计
                 total_time = time.time() - total_start
                 print(f"\n{'=' * 60}")
@@ -423,6 +431,69 @@ class DoclingBackgroundTask:
 
         except Exception as e:
             print(f"[Qwen API 2] 提取失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _call_extract_onto_api(
+        self,
+        task_id: str,
+        pdf_path: Path,
+        structured_data: list
+    ) -> Optional[Dict[str, Any]]:
+        """
+        调用 extract_onto API 上报结构化数据
+
+        Args:
+            task_id: 任务 ID
+            pdf_path: PDF 文件所在目录（用于查找 PDF 文件）
+            structured_data: agent.json 的内容（结构化数据列表）
+
+        Returns:
+            API 响应或 None（如果调用失败）
+        """
+        try:
+            from tender_ontology.config.settings import settings
+
+            # 构建请求数据（pdf_url 填空字符串）
+            request_data = {
+                "taskId": task_id,
+                "pdf_url": "",
+                "structured_data": structured_data
+            }
+
+            print(f"[Extract Onto API] 开始调用 API...")
+            print(f"[Extract Onto API] URL: {settings.tender_extract_api_url}")
+            print(f"[Extract Onto API] taskId: {task_id}")
+            print(f"[Extract Onto API] pdf_url: (空)")
+            print(f"[Extract Onto API] structured_data 条数: {len(structured_data)}")
+
+            # 发送请求
+            response = requests.post(
+                settings.tender_extract_api_url,
+                json=request_data,
+                headers={"Content-Type": "application/json"},
+                timeout=settings.tender_extract_api_timeout
+            )
+
+            # 检查响应
+            if response.status_code == 200:
+                result = response.json()
+                print(f"[Extract Onto API] 调用成功: {result}")
+                return result
+            else:
+                print(f"[Extract Onto API] 调用失败: HTTP {response.status_code}")
+                print(f"[Extract Onto API] 响应内容: {response.text[:500]}")
+                return None
+
+        except requests.Timeout:
+            print(f"[Extract Onto API] 请求超时（{settings.tender_extract_api_timeout}秒）")
+            return None
+        except requests.RequestException as e:
+            print(f"[Extract Onto API] 请求异常: {e}")
+            return None
+        except Exception as e:
+            print(f"[Extract Onto API] 调用失败: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -593,32 +664,110 @@ def get_background_task_handler() -> DoclingBackgroundTask:
     return _background_task_handler
 
 
-if __name__ == "__main__":
-    # 直接测试千问标题提取（直接内容模式）
-    from .qwen_heading_extractor import QwenDirectExtractor
+def test_extract_onto_api(task_id: str = "25112810181731940156"):
+    """
+    测试 extract_onto API 调用
 
-    # 测试文件路径
-    test_file = "path/to/your/markdown_file.md"
+    直接读取指定任务目录下的 _agent.json 文件并调用 API
 
-    print(f"开始提取标题（直接内容模式）\n")
-    print(f"测试文件: {test_file}\n")
-
-    extractor = QwenDirectExtractor()
-
-    # 如果文件存在则提取
+    Args:
+        task_id: 任务 ID，默认为 25112810181731940156
+    """
+    import json
+    import requests
     from pathlib import Path
-    if Path(test_file).exists():
-        headings = extractor.extract_headings(test_file)
 
-        print(f"\n{'='*80}")
-        print(f"提取完成！共 {len(headings)} 个标题")
-        print(f"{'='*80}\n")
+    # 构建任务目录路径
+    base_dir = Path(__file__).parent.parent.parent.parent.parent / "static" / "upload" / task_id
 
-        # 打印所有标题（Markdown 格式）
-        for h in headings:
-            prefix = "#" * h["level"]
-            id_str = f" {{id={h['id']}}}" if h.get('id') else ""
-            print(f"{prefix} {h['text']}{id_str}")
+    print(f"{'=' * 60}")
+    print(f"[测试] Extract Onto API 调用测试")
+    print(f"{'=' * 60}")
+    print(f"[测试] 任务 ID: {task_id}")
+    print(f"[测试] 任务目录: {base_dir}")
+
+    # 查找 _agent.json 文件
+    agent_files = list(base_dir.glob("*_agent.json"))
+    if not agent_files:
+        print(f"[测试] 错误: 未找到 *_agent.json 文件")
+        print(f"[测试] 目录内容: {list(base_dir.glob('*'))[:10]}")
+        return None
+
+    agent_file = agent_files[0]
+    print(f"[测试] 找到 agent.json: {agent_file.name}")
+
+    # 读取文件内容
+    try:
+        structured_data = json.loads(agent_file.read_text(encoding='utf-8'))
+        print(f"[测试] structured_data 条数: {len(structured_data)}")
+    except Exception as e:
+        print(f"[测试] 读取文件失败: {e}")
+        return None
+
+    # 加载配置
+    try:
+        from tender_ontology.config.settings import settings
+        api_url = settings.tender_extract_api_url
+        timeout = settings.tender_extract_api_timeout
+    except Exception:
+        # 如果无法加载配置，使用默认值
+        api_url = "http://112.111.20.89:8902/tender/extract_onto"
+        timeout = 600
+
+    # 构建请求数据
+    request_data = {
+        "taskId": task_id,
+        "pdf_url": "",
+        "structured_data": structured_data
+    }
+
+    print(f"\n[测试] 开始调用 API...")
+    print(f"[测试] URL: {api_url}")
+    print(f"[测试] taskId: {task_id}")
+    print(f"[测试] pdf_url: (空)")
+    print(f"[测试] structured_data 条数: {len(structured_data)}")
+
+    # 发送请求
+    try:
+        response = requests.post(
+            api_url,
+            json=request_data,
+            headers={"Content-Type": "application/json"},
+            timeout=timeout
+        )
+
+        print(f"\n[测试] HTTP 状态码: {response.status_code}")
+
+        if response.status_code == 200:
+            result = response.json()
+            print(f"[测试] 调用成功!")
+            print(f"[测试] 响应: {json.dumps(result, ensure_ascii=False, indent=2)[:500]}")
+            return result
+        else:
+            print(f"[测试] 调用失败!")
+            print(f"[测试] 响应内容: {response.text[:500]}")
+            return None
+
+    except requests.Timeout:
+        print(f"[测试] 请求超时（{timeout}秒）")
+        return None
+    except requests.RequestException as e:
+        print(f"[测试] 请求异常: {e}")
+        return None
+    except Exception as e:
+        print(f"[测试] 未知错误: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+if __name__ == "__main__":
+    import sys
+
+    # 如果有命令行参数，使用第一个参数作为 task_id
+    if len(sys.argv) > 1:
+        task_id = sys.argv[1]
     else:
-        print(f"测试文件不存在: {test_file}")
-        print("请修改 test_file 变量指向有效的 Markdown 文件")
+        task_id = "25112810181731940156"
+
+    test_extract_onto_api(task_id)

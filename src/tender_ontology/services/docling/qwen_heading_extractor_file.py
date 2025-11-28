@@ -209,8 +209,13 @@ class QwenHeadingExtractor:
         else:
             markdown_content = response.strip()
 
-        # 正则匹配 {id=xxx} 格式
-        id_pattern = re.compile(r'\{id=([^}]+)\}')
+        # 正则匹配 {type=xxx, id=xxx} 或 {id=xxx} 格式
+        # 格式1: {type=volume, id=texts-56}
+        # 格式2: {id=texts-57}
+        type_id_pattern = re.compile(r'\{type=(\w+),\s*id=([^}]+)\}')
+        id_only_pattern = re.compile(r'\{id=([^}]+)\}')
+        # 用于移除整个 {...} 部分
+        attr_pattern = re.compile(r'\{[^}]+\}')
 
         # 解析标题
         headings = []
@@ -218,23 +223,34 @@ class QwenHeadingExtractor:
             line = line.strip()
             if line.startswith('#'):
                 level = len(line) - len(line.lstrip('#'))
-                text_with_id = line.lstrip('#').strip()
+                text_with_attrs = line.lstrip('#').strip()
 
-                # 提取 id
-                id_match = id_pattern.search(text_with_id)
-                node_id = id_match.group(1) if id_match else None
+                # 先尝试匹配 {type=xxx, id=xxx} 格式
+                type_id_match = type_id_pattern.search(text_with_attrs)
+                if type_id_match:
+                    node_type = type_id_match.group(1)
+                    node_id = type_id_match.group(2)
+                else:
+                    # 再尝试匹配 {id=xxx} 格式
+                    id_match = id_only_pattern.search(text_with_attrs)
+                    node_id = id_match.group(1) if id_match else None
+                    node_type = None
 
-                # 移除 {id=xxx} 部分，得到纯文本
-                text = id_pattern.sub('', text_with_id).strip()
+                # 移除 {...} 部分，得到纯文本
+                text = attr_pattern.sub('', text_with_attrs).strip()
 
                 if text:
-                    headings.append({
+                    heading = {
                         "id": node_id,
                         "text": text,
                         "level": level,
                         "page": None,
                         "bboxes": []
-                    })
+                    }
+                    # 只有当 type 存在时才添加
+                    if node_type:
+                        heading["type"] = node_type
+                    headings.append(heading)
 
         return headings
 
@@ -352,7 +368,7 @@ class QwenHeadingExtractor:
                 {"role": "user", "content": user_content}
             ],
             "temperature": 0.0,
-            "top_p": 0.7,
+            "top_p": 1.0,
             "repetition_penalty": 1.05,
             "max_tokens": 8192
         }
@@ -382,14 +398,16 @@ class QwenHeadingExtractor:
 
             content_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-            # 保存千问返回的markdown内容（带时间戳，添加type标记）
+            # 为响应内容添加 type 标记（册→volume，章→chapter）
+            if content_text:
+                content_text = self._enrich_markdown_with_type(content_text)
+
+            # 保存带 type 标记的 markdown 内容（带时间戳）
             if save_response_path and content_text:
                 from datetime import datetime
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 md_path = save_response_path.parent / f"{save_response_path.stem}_{timestamp}.md"
-                # 为markdown添加type标记
-                enriched_content = self._enrich_markdown_with_type(content_text)
-                md_path.write_text(enriched_content, encoding='utf-8')
+                md_path.write_text(content_text, encoding='utf-8')
                 if verbose:
                     print(f"[Qwen32b] Markdown响应已保存: {md_path.name}")
 
@@ -430,7 +448,7 @@ class QwenHeadingExtractor:
                 {"role": "user", "content": user_content}
             ],
             "temperature": 0.0,
-            "top_p": 0.7,
+            "top_p": 1.0,
             "repetition_penalty": 1.05,
             "max_tokens": 8192
         }
@@ -1401,7 +1419,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--task-id",
         type=str,
-        default="25112719364823166528",
+        default="25112810051018695596",
         help="任务ID（默认：25112719364823166528）"
     )
     parser.add_argument(
