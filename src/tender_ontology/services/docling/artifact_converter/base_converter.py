@@ -6,10 +6,12 @@ BaseConverter - 所有转换器的公共基类
 2. 阅读顺序构建（_build_reading_order）
 3. 通用工具方法（normalize_id, remove_zero_width_chars, get_element_position）
 4. 坐标转换（convert_bbox_to_topleft）
+5. 统一排序（sort_elements_by_page_and_position）
 """
 
 import re
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple, Optional, List
+from itertools import groupby
 
 
 class BaseConverter:
@@ -345,3 +347,58 @@ class BaseConverter:
             print(f"    - Body 树中: {body_count} 个元素")
             print(f"    - Fallback: {fallback_count} 个元素")
             print(f"    - 总共: {len(element_order)} 个元素")
+
+    def sort_elements_by_page_and_position(
+        self,
+        elements: List[Dict[str, Any]],
+        page_key: str = "page",
+        top_key: str = "top",
+        order_key: str = "order",
+        use_topleft_coord: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        统一的元素排序方法：先按 body 树 DFS 顺序分页，然后页内按 bbox 位置排序
+
+        排序策略：
+        1. 先按 body 树 DFS 顺序（order 字段）排序
+        2. 按页码分组
+        3. 每页内部按 top 值排序（从上到下）
+
+        Args:
+            elements: 元素列表，每个元素需要包含 page, top, order 字段
+            page_key: 页码字段名
+            top_key: top 坐标字段名
+            order_key: DFS 顺序字段名
+            use_topleft_coord: 是否使用左上角坐标系
+                - True: top 值小表示位置高（左上角坐标系），升序排列
+                - False: top 值大表示位置高（左下角坐标系），降序排列
+
+        Returns:
+            排序后的元素列表
+        """
+        if not elements:
+            return elements
+
+        # 第一步：按 DFS 顺序排序
+        elements_sorted = sorted(elements, key=lambda x: x.get(order_key, 999999))
+
+        # 第二步：按页分组，页内按 top 排序
+        sorted_result = []
+
+        for page, group in groupby(elements_sorted, key=lambda x: x.get(page_key, 0) or 0):
+            page_elements = list(group)
+
+            # 页内按 top 排序
+            if use_topleft_coord:
+                # 左上角坐标系：top 值小的在上面，升序排列
+                page_elements.sort(key=lambda x: x.get(top_key, 0) or 0)
+            else:
+                # 左下角坐标系（PDF 默认）：top 值大的在上面，降序排列
+                page_elements.sort(key=lambda x: -(x.get(top_key, 0) or 0))
+
+            sorted_result.extend(page_elements)
+
+        if self.debug:
+            print(f"  [DEBUG] 排序完成: {len(sorted_result)} 个元素")
+
+        return sorted_result

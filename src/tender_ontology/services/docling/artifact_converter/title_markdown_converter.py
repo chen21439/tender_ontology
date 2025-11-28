@@ -45,6 +45,10 @@ class TitleMarkdownConverter(BaseConverter):
         # 构建父子关系映射（用于判断 text 是否在表格内）
         parent_map = self._build_parent_map(docling_json)
 
+        # 构建文档元素映射（用于排序）
+        element_order = {}
+        self._build_reading_order(docling_json, element_order)
+
         # 收集所有元素（texts + tables）
         all_elements = []
         texts_in_table = 0
@@ -72,7 +76,11 @@ class TitleMarkdownConverter(BaseConverter):
             # 使用统一 ID
             node_id = self.normalize_id(self_ref)
 
+            # 获取 DFS 顺序
+            order_idx = element_order.get(self_ref, 999999)
+
             element_data = {
+                "order": order_idx,
                 "page_no": page_no,
                 "top": top,
                 "id": node_id,
@@ -110,7 +118,11 @@ class TitleMarkdownConverter(BaseConverter):
                 # 使用统一 ID
                 node_id = self.normalize_id(self_ref)
 
+                # 获取 DFS 顺序
+                order_idx = element_order.get(self_ref, 999999)
+
                 all_elements.append({
+                    "order": order_idx,
                     "page_no": page_no,
                     "top": top,
                     "id": node_id,
@@ -118,8 +130,18 @@ class TitleMarkdownConverter(BaseConverter):
                     "text": table_html
                 })
 
-        # 按页面坐标排序：先按页码，再按 top 值降序（PDF 坐标系中 top 越大越靠上）
-        all_elements.sort(key=lambda x: (x["page_no"], -x["top"]))
+        # 统一排序：先按 body 树 DFS 顺序分页，然后页内按 bbox 位置排序
+        all_elements = self.sort_elements_by_page_and_position(
+            all_elements,
+            page_key="page_no",
+            top_key="top",
+            order_key="order",
+            use_topleft_coord=False  # 使用原始左下角坐标系的 top 值
+        )
+
+        # 移除临时字段
+        for elem in all_elements:
+            elem.pop("order", None)
 
         # 生成 Markdown（标题之间只保留头尾各2行内容）
         markdown_lines = []

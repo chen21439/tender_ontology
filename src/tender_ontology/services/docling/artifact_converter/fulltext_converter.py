@@ -93,8 +93,12 @@ class FulltextJsonConverter(BaseConverter):
             # 使用统一 ID
             node_id = self.normalize_id(self_ref)
 
+            # 获取 top 值用于页内排序（使用原始 prov 中的 top，不受坐标转换影响）
+            page_no, top = self.get_element_position(item)
+
             element_data = {
                 "order": order_idx,
+                "top": top,  # 用于页内排序
                 "id": node_id,
                 "docling_ref": self_ref,
                 "label": label,
@@ -133,8 +137,12 @@ class FulltextJsonConverter(BaseConverter):
                 # 使用统一 ID
                 node_id = self.normalize_id(self_ref)
 
+                # 获取 top 值用于页内排序
+                page_no, top = self.get_element_position(table)
+
                 all_elements.append({
                     "order": order_idx,
+                    "top": top,  # 用于页内排序
                     "id": node_id,
                     "docling_ref": self_ref,
                     "label": "table",
@@ -147,13 +155,20 @@ class FulltextJsonConverter(BaseConverter):
             if table_count > 0:
                 print(f"  [DEBUG] 跳过 {table_count} 个表格的处理 (process_tables=False)")
 
-        # 按文档顺序排序
-        all_elements.sort(key=lambda x: x["order"])
+        # 统一排序：先按 body 树 DFS 顺序分页，然后页内按 bbox 位置排序
+        all_elements = self.sort_elements_by_page_and_position(
+            all_elements,
+            page_key="page",
+            top_key="top",
+            order_key="order",
+            use_topleft_coord=False  # 使用原始左下角坐标系的 top 值
+        )
 
-        # 移除临时的 order 字段
+        # 移除临时字段
         items = []
         for elem in all_elements:
             elem.pop("order", None)
+            elem.pop("top", None)
             items.append(elem)
 
         if self.debug:

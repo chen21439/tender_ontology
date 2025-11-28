@@ -35,6 +35,10 @@ class SectionHeaderOnlyConverter(BaseConverter):
         Returns:
             只包含标题的 Markdown 字符串
         """
+        # 构建文档元素映射（用于排序）
+        element_order = {}
+        self._build_reading_order(docling_json, element_order)
+
         # 收集所有 section_header
         headers = []
         skipped_count = 0
@@ -59,7 +63,11 @@ class SectionHeaderOnlyConverter(BaseConverter):
             # 获取 level
             level = item.get("level", 1)
 
+            # 获取 DFS 顺序
+            order_idx = element_order.get(self_ref, 999999)
+
             headers.append({
+                "order": order_idx,
                 "page_no": page_no,
                 "top": top,
                 "id": node_id,
@@ -70,8 +78,18 @@ class SectionHeaderOnlyConverter(BaseConverter):
         if self.debug:
             print(f"  [DEBUG] 找到 {len(headers)} 个标题，跳过 {skipped_count} 个非标题元素")
 
-        # 按页面坐标排序：先按页码，再按 top 值降序（PDF 坐标系中 top 越大越靠上）
-        headers.sort(key=lambda x: (x["page_no"], -x["top"]))
+        # 统一排序：先按 body 树 DFS 顺序分页，然后页内按 bbox 位置排序
+        headers = self.sort_elements_by_page_and_position(
+            headers,
+            page_key="page_no",
+            top_key="top",
+            order_key="order",
+            use_topleft_coord=False  # 使用原始左下角坐标系的 top 值
+        )
+
+        # 移除临时字段
+        for h in headers:
+            h.pop("order", None)
 
         # 生成 Markdown
         markdown_lines = []
