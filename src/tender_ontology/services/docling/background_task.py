@@ -446,43 +446,65 @@ class DoclingBackgroundTask:
 
         Args:
             task_id: 任务 ID
-            pdf_path: PDF 文件所在目录（用于查找 PDF 文件）
+            pdf_path: PDF 文件所在目录（用于保存响应）
             structured_data: agent.json 的内容（结构化数据列表）
 
         Returns:
             API 响应或 None（如果调用失败）
         """
+        import time
+
         try:
             from tender_ontology.config.settings import settings
 
-            # 构建请求数据（pdf_url 填空字符串）
+            # 构建请求数据
             request_data = {
-                "taskId": task_id,
+                "task_id": task_id,
                 "pdf_url": "",
+                "document_type": "",
+                "region": "",
                 "structured_data": structured_data
             }
 
             print(f"[Extract Onto API] 开始调用 API...")
             print(f"[Extract Onto API] URL: {settings.tender_extract_api_url}")
-            print(f"[Extract Onto API] taskId: {task_id}")
-            print(f"[Extract Onto API] pdf_url: (空)")
+            print(f"[Extract Onto API] task_id: {task_id}")
             print(f"[Extract Onto API] structured_data 条数: {len(structured_data)}")
 
-            # 发送请求
+            # 发送请求（带耗时统计）
+            start_time = time.time()
             response = requests.post(
                 settings.tender_extract_api_url,
                 json=request_data,
                 headers={"Content-Type": "application/json"},
                 timeout=settings.tender_extract_api_timeout
             )
+            elapsed_time = time.time() - start_time
 
             # 检查响应
             if response.status_code == 200:
                 result = response.json()
-                print(f"[Extract Onto API] 调用成功: {result}")
+                print(f"[Extract Onto API] 调用成功，耗时: {elapsed_time:.2f} 秒")
+
+                # 保存响应到 _ontology.json
+                if isinstance(pdf_path, Path) and pdf_path.exists():
+                    # 查找基础文件名
+                    agent_files = list(pdf_path.glob("*_agent.json"))
+                    if agent_files:
+                        base_name = agent_files[0].stem.replace('_agent', '')
+                        ontology_path = pdf_path / f"{base_name}_ontology.json"
+                    else:
+                        ontology_path = pdf_path / f"{task_id}_ontology.json"
+
+                    ontology_path.write_text(
+                        json.dumps(result, ensure_ascii=False, indent=2),
+                        encoding='utf-8'
+                    )
+                    print(f"[Extract Onto API] 响应已保存: {ontology_path.name}")
+
                 return result
             else:
-                print(f"[Extract Onto API] 调用失败: HTTP {response.status_code}")
+                print(f"[Extract Onto API] 调用失败: HTTP {response.status_code}，耗时: {elapsed_time:.2f} 秒")
                 print(f"[Extract Onto API] 响应内容: {response.text[:500]}")
                 return None
 
@@ -716,32 +738,48 @@ def test_extract_onto_api(task_id: str = "25112810181731940156"):
 
     # 构建请求数据
     request_data = {
-        "taskId": task_id,
+        "task_id": task_id,
         "pdf_url": "",
+        "document_type": "",
+        "region": "",
         "structured_data": structured_data
     }
 
     print(f"\n[测试] 开始调用 API...")
     print(f"[测试] URL: {api_url}")
-    print(f"[测试] taskId: {task_id}")
+    print(f"[测试] task_id: {task_id}")
     print(f"[测试] pdf_url: (空)")
     print(f"[测试] structured_data 条数: {len(structured_data)}")
 
     # 发送请求
+    import time
     try:
+        start_time = time.time()
         response = requests.post(
             api_url,
             json=request_data,
             headers={"Content-Type": "application/json"},
             timeout=timeout
         )
+        elapsed_time = time.time() - start_time
 
         print(f"\n[测试] HTTP 状态码: {response.status_code}")
+        print(f"[测试] 耗时: {elapsed_time:.2f} 秒")
 
         if response.status_code == 200:
             result = response.json()
             print(f"[测试] 调用成功!")
             print(f"[测试] 响应: {json.dumps(result, ensure_ascii=False, indent=2)[:500]}")
+
+            # 保存响应到 _ontology.json
+            base_name = agent_file.stem.replace('_agent', '')
+            ontology_path = base_dir / f"{base_name}_ontology.json"
+            ontology_path.write_text(
+                json.dumps(result, ensure_ascii=False, indent=2),
+                encoding='utf-8'
+            )
+            print(f"[测试] 响应已保存: {ontology_path}")
+
             return result
         else:
             print(f"[测试] 调用失败!")

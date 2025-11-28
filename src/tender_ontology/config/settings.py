@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     tender_extract_api_url: str = "http://112.111.20.89:8902/tender/extract_onto"
     tender_extract_api_timeout: int = 600  # 10分钟超时
 
+    # Internal Qwen API
+    qwen_api_url: str = "http://175.42.62.118:9102/v1/chat/completions"
+    qwen_api_timeout: int = 120
+
 
 settings = Settings()
 

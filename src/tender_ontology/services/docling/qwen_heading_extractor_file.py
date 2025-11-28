@@ -333,8 +333,13 @@ class QwenHeadingExtractor:
 
     # ========== 内部千问32b API 调用 ==========
 
-    INTERNAL_API_URL = "http://175.42.62.118:9102/v1/chat/completions"
     INTERNAL_MODEL = "qwen3-32b"
+
+    @property
+    def INTERNAL_API_URL(self) -> str:
+        """从配置读取千问 API URL"""
+        from tender_ontology.config.settings import settings
+        return settings.qwen_api_url
 
     def _call_internal_qwen32b(
         self,
