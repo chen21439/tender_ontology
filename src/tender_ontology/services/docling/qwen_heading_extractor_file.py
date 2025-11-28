@@ -156,7 +156,7 @@ class QwenHeadingExtractor:
 - 二级标题 `##`：**"第X章"** 格式的标题（挂载在册/部分/节下）
 
 **情况二：文档不存在"册/部分/节"结构**
-- 一级标题 `#`：**"第X章"** 格式的标题
+- 一级标题 `#`：**"第X章"** 格式的标题一起
 - 二级标题 `##`：章下的主要分节（如"一、""二、"等）
 
 ### 补充说明
@@ -762,11 +762,10 @@ class QwenHeadingExtractor:
         if verbose:
             print(f"[聚合] 是否存在 volume 结构: {has_volume}")
 
-        # 构建 chapter_id -> 原始 level 的映射
-        chapter_pattern = re.compile(r'第[一二三四五六七八九十\d]+章')
+        # 构建 chapter_id -> 原始 level 的映射（用 type=chapter 判断）
         chapter_level_map = {}
         for h in level12_headings:
-            if chapter_pattern.search(h.get("text", "")):
+            if h.get("type") == "chapter":
                 chapter_level_map[h.get("id")] = h.get("level", 1)
 
         # 聚合结果
@@ -776,8 +775,8 @@ class QwenHeadingExtractor:
         for h in level12_headings:
             node_id = h.get("id")
 
-            # 如果是 chapter，插入其子标题
-            if chapter_pattern.search(h.get("text", "")):
+            # 如果是 chapter，插入其子标题（用 type=chapter 判断）
+            if h.get("type") == "chapter":
                 # 先添加 chapter 本身
                 all_headings.append(h)
                 processed_chapter_ids.add(node_id)
@@ -1316,12 +1315,10 @@ class QwenHeadingExtractor:
         )
 
         # 筛选出 type=chapter 的标题作为锚点
-        chapter_headings = []
-        chapter_pattern = re.compile(r'第[一二三四五六七八九十\d]+章')
-
-        for h in level12_headings:
-            if chapter_pattern.search(h.get("text", "")):
-                chapter_headings.append(h)
+        chapter_headings = [
+            h for h in level12_headings
+            if h.get("type") == "chapter"
+        ]
 
         stage1_time = time.time() - stage1_start
 

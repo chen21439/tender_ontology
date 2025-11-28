@@ -343,11 +343,10 @@ class DoclingBackgroundTask:
             }
 
             # ========== 阶段2：并发提取章节内子标题 ==========
-            # 筛选出 chapter 标题
-            chapter_pattern = re.compile(r'第[一二三四五六七八九十\d]+章')
+            # 筛选出 chapter 标题（一阶段模型已标记 type=chapter）
             chapter_headings = [
                 h for h in level12_headings
-                if chapter_pattern.search(h.get("text", ""))
+                if h.get("type") == "chapter"
             ]
 
             if chapter_headings:
