@@ -230,6 +230,30 @@ if __name__ == "__main__":
         parse_time = time.time() - parse_start
         print(f"[partition_docx] 解析完成，共 {len(elements)} 个元素，耗时: {parse_time:.2f} 秒")
 
+        # 类别统计
+        categories = {}
+        for el in elements:
+            cat = getattr(el, "category", None) or "Unknown"
+            categories[cat] = categories.get(cat, 0) + 1
+
+        print(f"\n[类别统计]")
+        for cat, cnt in sorted(categories.items(), key=lambda x: -x[1]):
+            print(f"  {cat}: {cnt}")
+
+        # 打印前3个元素
+        print(f"\n[前 3 个元素详情]")
+        for i, el in enumerate(elements[:3]):
+            cat = getattr(el, "category", None)
+            text = (el.text or "")[:100] + ("..." if len(el.text or "") > 100 else "")
+            print(f"\n--- Element [{i}] ---")
+            print(json.dumps({
+                "index": i,
+                "type": type(el).__name__,
+                "category": cat,
+                "text": text,
+                "text_length": len(el.text or "")
+            }, ensure_ascii=False, indent=2))
+
         # 计时：文件写入
         write_start = time.time()
 
