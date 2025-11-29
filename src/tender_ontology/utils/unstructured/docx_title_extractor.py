@@ -243,16 +243,8 @@ if __name__ == "__main__":
         # 打印前3个元素
         print(f"\n[前 3 个元素详情]")
         for i, el in enumerate(elements[:3]):
-            cat = getattr(el, "category", None)
-            text = (el.text or "")[:100] + ("..." if len(el.text or "") > 100 else "")
             print(f"\n--- Element [{i}] ---")
-            print(json.dumps({
-                "index": i,
-                "type": type(el).__name__,
-                "category": cat,
-                "text": text,
-                "text_length": len(el.text or "")
-            }, ensure_ascii=False, indent=2))
+            print(json.dumps(el.to_dict(), ensure_ascii=False, indent=2, default=str))
 
         # 计时：文件写入
         write_start = time.time()
