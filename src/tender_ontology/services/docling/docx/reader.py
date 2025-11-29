@@ -189,6 +189,129 @@ class DocxReader:
 
         return rows
 
+    def read_to_fulltext(self, docx_path: str | Path) -> List[Dict[str, Any]]:
+        """
+        读取 DOCX 文件，输出与 PDF fulltext.json 兼容的格式
+
+        Args:
+            docx_path: DOCX 文件路径
+
+        Returns:
+            与 PDF fulltext.json 格式兼容的列表：
+            [
+                {"text": "...", "label": "section_header", "prov": [{"page_no": 1}]},
+                {"text": "...", "label": "paragraph", "prov": [{"page_no": 1}]},
+                ...
+            ]
+        """
+        result = self.read(docx_path)
+        fulltext_items = []
+
+        for item in result["items"]:
+            if item["type"] == "text":
+                # 转换 label 格式
+                label = item.get("label", "").lower()
+                if "section_header" in label:
+                    normalized_label = "section_header"
+                elif "title" in label:
+                    normalized_label = "title"
+                elif "list_item" in label:
+                    normalized_label = "list_item"
+                else:
+                    normalized_label = "paragraph"
+
+                fulltext_items.append({
+                    "text": item["content"],
+                    "label": normalized_label,
+                    "prov": [{"page_no": 1}]  # DOCX 没有页码，统一设为1
+                })
+
+            elif item["type"] == "table":
+                # 表格转为文本表示
+                table_text = self._table_to_text(item["rows"])
+                fulltext_items.append({
+                    "text": table_text,
+                    "label": "table",
+                    "prov": [{"page_no": 1}]
+                })
+
+        return fulltext_items
+
+    def _table_to_text(self, rows: List[List[str]]) -> str:
+        """将表格转为文本表示"""
+        lines = []
+        for row in rows:
+            lines.append(" | ".join(row))
+        return "\n".join(lines)
+
+    def generate_auxiliary_files(
+        self,
+        docx_path: str | Path,
+        output_dir: Path
+    ) -> Dict[str, Path]:
+        """
+        生成模型调用所需的辅助文件（与 PDF 流程兼容）
+
+        Args:
+            docx_path: DOCX 文件路径
+            output_dir: 输出目录
+
+        Returns:
+            生成的文件路径字典：
+            {
+                "fulltext_path": Path,
+                "header_only_path": Path,
+                "title_md_path": Path
+            }
+        """
+        import json
+
+        docx_path = Path(docx_path)
+        base_name = docx_path.stem
+
+        # 1. 读取并生成 fulltext 格式数据
+        fulltext_data = self.read_to_fulltext(docx_path)
+
+        # 2. 保存 _docx_fulltext.json
+        fulltext_path = output_dir / f"{base_name}_docx_fulltext.json"
+        fulltext_path.write_text(
+            json.dumps(fulltext_data, ensure_ascii=False, indent=2),
+            encoding='utf-8'
+        )
+        if self.debug:
+            print(f"[DocxReader] 已保存: {fulltext_path.name}")
+
+        # 3. 生成 _docx_sectionHeader_only.md（仅标题）
+        header_lines = []
+        for item in fulltext_data:
+            if item["label"] == "section_header":
+                header_lines.append(item["text"])
+
+        header_only_path = output_dir / f"{base_name}_docx_sectionHeader_only.md"
+        header_only_path.write_text("\n".join(header_lines), encoding='utf-8')
+        if self.debug:
+            print(f"[DocxReader] 已保存: {header_only_path.name}（{len(header_lines)} 个标题）")
+
+        # 4. 生成 _docx_title_with_id.md（带 ID 的标题）
+        title_lines = []
+        header_id = 0
+        for item in fulltext_data:
+            if item["label"] == "section_header":
+                title_lines.append(f"[H{header_id}] {item['text']}")
+                header_id += 1
+
+        title_md_path = output_dir / f"{base_name}_docx_title_with_id.md"
+        title_md_path.write_text("\n".join(title_lines), encoding='utf-8')
+        if self.debug:
+            print(f"[DocxReader] 已保存: {title_md_path.name}")
+
+        return {
+            "fulltext_path": str(fulltext_path),
+            "header_only_path": str(header_only_path),
+            "title_md_path": str(title_md_path),
+            "header_count": len(header_lines)
+        }
+
     def read_to_text(self, docx_path: str | Path) -> str:
         """
         读取 DOCX 文件并转换为带标签的文本

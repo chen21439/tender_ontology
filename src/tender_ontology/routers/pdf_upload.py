@@ -1,0 +1,728 @@
+"""
+PDF 上传路由
+
+只提供 PDF 文件上传和数据库记录管理功能
+表格提取和向量化由 Docling 处理
+
+存储模式：
+- STORAGE_MODE=mysql (默认): 使用 MySQL 数据库
+- STORAGE_MODE=local: 使用本地 JSON 文件
+"""
+
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks
+from fastapi.responses import FileResponse
+from typing import Optional
+from pathlib import Path
+import uuid
+from datetime import datetime
+import shutil
+import asyncio
+
+from tender_ontology.models.pdf_task import (
+    PDFProcessResponse,
+    TaskStatusResponse,
+    PageRequest,
+    PageResponse,
+    PageDataResponse
+)
+from tender_ontology.utils.db.local_storage import is_local_mode, get_local_storage
+
+# 创建路由
+router = APIRouter(tags=["PDF上传"])
+
+
+# ==================== 辅助函数 ====================
+
+def generate_task_id() -> str:
+    """
+    生成任务ID (20位字符串)
+
+    Returns:
+        任务ID (格式: 时间戳12位 + 随机数8位)
+    """
+    timestamp = datetime.now().strftime("%y%m%d%H%M%S")  # 12位
+    random_part = str(uuid.uuid4().int)[:8]  # 8位随机数
+    return timestamp + random_part
+
+
+def get_static_upload_dir() -> Path:
+    """
+    获取 static/upload 目录路径
+
+    Returns:
+        static/upload 目录的 Path 对象
+    """
+    # 获取项目根目录 (tender_ontology/)
+    current_file = Path(__file__)  # .../routers/pdf_upload.py
+    project_root = current_file.parent.parent.parent.parent  # 向上4级
+    static_upload = project_root / "static" / "upload"
+    static_upload.mkdir(parents=True, exist_ok=True)
+    return static_upload
+
+
+def get_task_upload_dir(task_id: str) -> Path:
+    """
+    获取指定任务的上传目录路径
+
+    Args:
+        task_id: 任务ID
+
+    Returns:
+        static/upload/{task_id} 目录的 Path 对象
+    """
+    static_upload = get_static_upload_dir()
+    task_dir = static_upload / task_id
+    task_dir.mkdir(parents=True, exist_ok=True)
+    return task_dir
+
+
+# ==================== 路由接口 ====================
+
+@router.post("/upload_pdf", response_model=PDFProcessResponse, summary="上传PDF文件")
+async def upload_pdf(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(..., description="PDF文件"),
+    project_name: Optional[str] = Form(None, description="项目名称"),
+    project_code: Optional[str] = Form(None, description="项目编号"),
+    procurement_method: Optional[str] = Form(None, description="采购方式"),
+    project_type: Optional[str] = Form(None, description="项目类型"),
+    overview: Optional[str] = Form(None, description="项目概述"),
+    app_id: Optional[str] = Form(None, description="租户ID"),
+    create_user: Optional[str] = Form(None, description="创建用户ID"),
+    create_user_name: Optional[str] = Form(None, description="创建用户名称"),
+    save_to_db: bool = Form(True, description="是否保存到数据库，默认True"),
+    enable_docling: bool = Form(True, description="是否启用 Docling 自动处理，默认True")
+):
+    """
+    上传 PDF 文件
+
+    功能:
+    1. 接收 PDF 文件上传
+    2. 生成唯一任务ID
+    3. 保存 PDF 文件到 static/uploads/{task_id}.pdf
+    4. 保存到 MySQL 数据库 (可选)
+
+    注意:
+    - 表格提取和向量化功能由 Docling 处理，此接口不涉及
+    - PDF 文件直接以任务ID命名，存储在 static/uploads/ 目录
+
+    返回:
+        任务ID和处理结果
+    """
+    try:
+        # 1. 验证文件类型
+        if not file.filename.lower().endswith('.pdf'):
+            return PDFProcessResponse(
+                success=False,
+                errCode="PDF_001",
+                errMsg="只支持 PDF 文件",
+                data=None
+            )
+
+        print(f"[PDF Upload] ========== Start ==========")
+        print(f"[PDF Upload] Filename: {file.filename}")
+        print(f"[PDF Upload] Project: {project_name or 'None'}")
+        print(f"[PDF Upload] Save to DB: {save_to_db}")
+        print(f"[PDF Upload] ================================")
+
+        # 2. 先创建数据库记录，获取任务ID（作为唯一标识）
+        task_id = None
+        db_task_id = None
+
+        if save_to_db:
+            if is_local_mode():
+                # 本地存储模式
+                try:
+                    storage = get_local_storage()
+                    task = storage.create_task(
+                        file_name=file.filename,
+                        file_path=None,  # 稍后更新
+                        project_name=project_name,
+                        project_code=project_code,
+                        procurement_method=procurement_method,
+                        project_type=project_type,
+                        overview=overview,
+                        app_id=app_id,
+                        create_user=create_user,
+                        create_user_name=create_user_name
+                    )
+                    db_task_id = task["id"]
+                    task_id = str(db_task_id)
+                    print(f"[PDF Upload] Local storage record created, task_id: {task_id}")
+                except Exception as e:
+                    print(f"[PDF Upload] Local storage save failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    task_id = generate_task_id()
+                    print(f"[PDF Upload] Using generated task_id: {task_id}")
+            else:
+                # MySQL 模式
+                try:
+                    from tender_ontology.utils.db.mysql import get_db, ComplianceService
+
+                    # 使用全局数据库连接池
+                    mysql = get_db()
+
+                    # 创建合规审查任务（状态：解析中 = 3）
+                    service = ComplianceService(mysql)
+                    db_task = service.create_task_from_pdf(
+                        pdf_path=None,  # 稍后更新
+                        file_id=None,  # 自动生成
+                        project_name=project_name,
+                        project_code=project_code,
+                        procurement_method=procurement_method,
+                        project_type=project_type,
+                        overview=overview,
+                        app_id=app_id,
+                        create_user=create_user,
+                        create_user_name=create_user_name
+                    )
+
+                    db_task_id = db_task.id
+                    task_id = str(db_task_id)  # 使用数据库ID作为任务ID
+                    print(f"[PDF Upload] DB record created, task_id: {task_id}")
+
+                except Exception as e:
+                    print(f"[PDF Upload] DB save failed: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    # 如果数据库创建失败，使用生成的ID
+                    task_id = generate_task_id()
+                    print(f"[PDF Upload] Using generated task_id: {task_id}")
+        else:
+            # 如果不保存到数据库，使用生成的ID
+            task_id = generate_task_id()
+            print(f"[PDF Upload] Using generated task_id: {task_id}")
+
+        # 3. 保存 PDF 文件到 static/upload/{task_id}/ 目录
+        task_dir = get_task_upload_dir(task_id)
+        pdf_filename = file.filename  # 保留原始文件名
+        pdf_path = task_dir / pdf_filename
+
+        with open(pdf_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        print(f"[PDF Upload] PDF saved: {pdf_path}")
+
+        # 4. 如果之前创建了数据库记录，更新 pdf_path 和文件名
+        if save_to_db and db_task_id:
+            if is_local_mode():
+                # 本地存储模式
+                try:
+                    storage = get_local_storage()
+                    relative_path = str(pdf_path.relative_to(task_dir.parent.parent))
+                    storage.update_task_file_path(db_task_id, relative_path, file.filename)
+                    print(f"[PDF Upload] Local storage file path updated")
+                except Exception as e:
+                    print(f"[PDF Upload] Local storage update failed: {e}")
+            else:
+                # MySQL 模式
+                try:
+                    from tender_ontology.utils.db.mysql import get_db
+                    from tender_ontology.utils.db.mysql.models import ComplianceFileTask
+
+                    # 使用全局数据库连接池
+                    mysql = get_db()
+
+                    # 更新任务的文件路径和文件名
+                    with mysql.get_session() as session:
+                        task = session.query(ComplianceFileTask).filter(
+                            ComplianceFileTask.id == db_task_id
+                        ).first()
+
+                        if task:
+                            # 更新文件路径（相对路径 static/upload/{task_id}/{filename}）
+                            task.file_path = str(pdf_path.relative_to(task_dir.parent.parent))
+                            # 更新文件名
+                            if not task.file_name:
+                                task.file_name = file.filename
+                            session.commit()
+                            print(f"[PDF Upload] DB file path updated")
+
+                except Exception as e:
+                    print(f"[PDF Upload] DB update failed: {e}")
+
+        # 5. 触发 Docling 后台处理（如果启用）
+        if enable_docling:
+            from tender_ontology.services.docling.background_task import get_background_task_handler
+            import threading
+
+            # 获取后台任务处理器
+            task_handler = get_background_task_handler()
+
+            # 在独立线程中运行 Docling 处理（避免阻塞 FastAPI）
+            # 输出目录设置为 task_dir，这样所有文件都在同一个目录
+            thread = threading.Thread(
+                target=task_handler.process_pdf_sync,
+                args=(pdf_path, task_id, db_task_id, task_dir),  # 传递 task_dir 作为输出目录
+                daemon=False  # 非守护线程，允许任务完成后再退出
+            )
+            thread.start()
+
+            print(f"[PDF Upload] Docling background thread started for task_id: {task_id}")
+            print(f"[PDF Upload] Output directory: {task_dir}")
+
+        # 6. 构建响应
+        response_data = {
+            "taskId": task_id,
+            "docId": task_id,  # 使用相同的ID
+            "dbTaskId": db_task_id,
+            "pdfPath": str(pdf_path),
+            "fileName": file.filename,
+            "projectName": project_name,
+            "savedToDb": save_to_db and db_task_id is not None,
+            "doclingEnabled": enable_docling,
+            "message": "PDF 上传成功" + (", Docling 后台处理中..." if enable_docling else "")
+        }
+
+        return PDFProcessResponse(
+            success=True,
+            errCode=None,
+            errMsg=None,
+            data=response_data
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return PDFProcessResponse(
+            success=False,
+            errCode="PDF_002",
+            errMsg=f"处理失败: {str(e)}",
+            data=None
+        )
+
+
+@router.get("/task/{task_id}", response_model=TaskStatusResponse, summary="查询任务状态")
+async def get_task_status(task_id: str):
+    """
+    查询任务状态
+
+    Args:
+        task_id: 任务ID (数据库中的主键)
+
+    Returns:
+        任务状态信息
+    """
+    try:
+        if is_local_mode():
+            # 本地存储模式
+            storage = get_local_storage()
+            task = storage.get_task(task_id)
+
+            if not task:
+                return TaskStatusResponse(
+                    success=False,
+                    errCode="TASK_001",
+                    errMsg=f"任务 {task_id} 不存在",
+                    data=None
+                )
+
+            return TaskStatusResponse(
+                success=True,
+                errCode=None,
+                errMsg=None,
+                data={
+                    "taskId": task["id"],
+                    "status": "completed" if task["review_status"] == 2 else "processing",
+                    "reviewStatus": task["review_status"],
+                    "reviewResult": task["review_result"],
+                    "fileName": task["file_name"],
+                    "projectName": task["project_name"],
+                    "createdAt": task["create_time"]
+                }
+            )
+        else:
+            # MySQL 模式
+            from tender_ontology.utils.db.mysql import get_db, ComplianceService
+
+            # 使用全局数据库连接池
+            mysql = get_db()
+
+            # 查询任务
+            service = ComplianceService(mysql)
+            task = service.get_task(task_id)
+
+            if not task:
+                return TaskStatusResponse(
+                    success=False,
+                    errCode="TASK_001",
+                    errMsg=f"任务 {task_id} 不存在",
+                    data=None
+                )
+
+            return TaskStatusResponse(
+                success=True,
+                errCode=None,
+                errMsg=None,
+                data={
+                    "taskId": task.id,
+                    "status": "completed" if task.review_status == 2 else "processing",
+                    "reviewStatus": task.review_status,
+                    "reviewResult": task.review_result,
+                    "fileName": task.file_name,
+                    "projectName": task.project_name,
+                    "createdAt": task.create_time.strftime("%Y-%m-%d %H:%M:%S") if task.create_time else None
+                }
+            )
+
+    except Exception as e:
+        return TaskStatusResponse(
+            success=False,
+            errCode="TASK_002",
+            errMsg=f"查询失败: {str(e)}",
+            data=None
+        )
+
+
+@router.post("/page", response_model=PageResponse, summary="分页查询任务列表")
+async def get_tasks_by_page(request: PageRequest):
+    """
+    分页查询任务列表
+
+    Args:
+        request: 分页请求参数
+            - pageNum: 页码（从1开始）
+            - pageSize: 每页数量
+
+    Returns:
+        分页数据
+    """
+    try:
+        # 参数验证
+        page_num = max(1, request.pageNum)
+        page_size = min(max(1, request.pageSize), 100)  # 限制最大100条
+
+        if is_local_mode():
+            # 本地存储模式
+            storage = get_local_storage()
+            page_data = storage.get_tasks_page(page_num, page_size)
+
+            return PageResponse(
+                success=True,
+                errCode=None,
+                errMsg=None,
+                data=PageDataResponse(
+                    total=str(page_data["total"]),
+                    pageSize=str(page_data["pageSize"]),
+                    pageTotal=str(page_data["pageTotal"]),
+                    pageNum=str(page_data["pageNum"]),
+                    dataList=page_data["dataList"]
+                )
+            )
+        else:
+            # MySQL 模式
+            from tender_ontology.utils.db.mysql import get_db
+            from tender_ontology.utils.db.mysql.models import ComplianceFileTask
+            from sqlalchemy import func
+
+            # 使用全局数据库连接池
+            mysql = get_db()
+
+            # 使用 get_session() 进行查询
+            with mysql.get_session() as session:
+                # 查询总数
+                total = session.query(func.count(ComplianceFileTask.id)).scalar()
+
+                # 分页查询
+                offset = (page_num - 1) * page_size
+                tasks = session.query(ComplianceFileTask)\
+                    .order_by(ComplianceFileTask.create_time.desc())\
+                    .limit(page_size)\
+                    .offset(offset)\
+                    .all()
+
+                # 计算总页数
+                pages = (total + page_size - 1) // page_size if total > 0 else 1
+
+                # 转换为字典列表（驼峰命名）
+                data_list = []
+                for task in tasks:
+                    # 计算审查进度
+                    review_progress = 100 if task.review_status == 2 else 0
+
+                    data_list.append({
+                        "taskId": task.id,
+                        "fileId": task.file_id,
+                        "fileName": task.file_name,
+                        "projectName": task.project_name,
+                        "projectCode": task.project_code,
+                        "reviewStatus": task.review_status,
+                        "reviewResult": task.review_result,
+                        "createTime": task.create_time.strftime("%Y-%m-%d %H:%M:%S") if task.create_time else None,
+                        "createUserName": task.create_user_name,
+                        "reviewProgress": review_progress
+                    })
+
+            return PageResponse(
+                success=True,
+                errCode=None,
+                errMsg=None,
+                data=PageDataResponse(
+                    total=str(total),
+                    pageSize=str(page_size),
+                    pageTotal=str(pages),
+                    pageNum=str(page_num),
+                    dataList=data_list
+                )
+            )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return PageResponse(
+            success=False,
+            errCode="PAGE_001",
+            errMsg=f"分页查询失败: {str(e)}",
+            data=PageDataResponse(
+                total="0",
+                pageSize=str(request.pageSize),
+                pageTotal="0",
+                pageNum=str(request.pageNum),
+                dataList=[]
+            )
+        )
+
+
+@router.get("/task/{task_id}/pdf", summary="下载任务PDF文件")
+async def download_task_pdf(task_id: str):
+    """
+    根据任务ID下载对应的PDF文件
+
+    Args:
+        task_id: 任务ID
+
+    Returns:
+        PDF 文件流
+    """
+    try:
+        # 构建PDF文件路径 - 从 static/upload/{task_id}/ 目录查找
+        task_dir = get_task_upload_dir(task_id)
+
+        # 查找目录中的PDF文件（假设每个任务目录只有一个PDF）
+        pdf_files = list(task_dir.glob("*.pdf"))
+
+        if not pdf_files:
+            raise HTTPException(status_code=404, detail=f"任务 {task_id} 的PDF文件不存在")
+
+        pdf_path = pdf_files[0]  # 取第一个PDF文件
+
+        # 返回文件
+        return FileResponse(
+            path=str(pdf_path),
+            filename=pdf_path.name,  # 使用原始文件名
+            media_type="application/pdf"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"下载失败: {str(e)}")
+
+
+@router.get("/task/{task_id}/result", summary="获取任务处理结果")
+async def get_task_result(
+    task_id: str,
+    result_type: str = "markdown"
+):
+    """
+    获取任务的 Docling 处理结果
+
+    Args:
+        task_id: 任务ID
+        result_type: 结果类型，支持: pdf, markdown, markdown_json, json, labeled, headers, model, fulltext, tree, level12, forward
+
+    Returns:
+        处理结果文件内容
+    """
+    try:
+        # 构建任务目录路径
+        task_dir = get_task_upload_dir(task_id)
+
+        # 根据类型查找对应的文件
+        file_patterns = {
+            "pdf": "*.pdf",
+            "markdown": "*.md",
+            "markdown_json": "*_markdown.json",
+            "json": "*_[0-9]*.json",  # 匹配带时间戳的 JSON 文件（排除 labeled 和 headers）
+            "labeled": "*_labeled.json",
+            "headers": "*_headers.json",
+            "model": "*_model.json",
+            "fulltext": "*_fulltext.json",
+            "tree": "*_agent.json",  # 优先使用 _agent.json（内部调用生成）
+            "level12": "*_level12.json",
+            "forward": "*_forward.json",
+            "ontology": "*_ontology.json"  # extract_onto API 返回的结果
+        }
+
+        if result_type not in file_patterns:
+            raise HTTPException(
+                status_code=400,
+                detail=f"不支持的结果类型: {result_type}，支持的类型: {', '.join(file_patterns.keys())}"
+            )
+
+        pattern = file_patterns[result_type]
+        result_files = list(task_dir.glob(pattern))
+
+        # 对于 json 类型，需要排除 labeled 和 headers
+        if result_type == "json":
+            result_files = [
+                f for f in result_files
+                if not (f.name.endswith("_labeled.json") or f.name.endswith("_headers.json"))
+            ]
+
+        # 对于 tree 类型，如果 _agent.json 不存在，回退到 _forward.json
+        if result_type == "tree" and not result_files:
+            result_files = list(task_dir.glob("*_forward.json"))
+
+        if not result_files:
+            raise HTTPException(
+                status_code=404,
+                detail=f"任务 {task_id} 的 {result_type} 结果文件不存在"
+            )
+
+        # 取最新的文件（按修改时间排序）
+        result_file = sorted(result_files, key=lambda f: f.stat().st_mtime, reverse=True)[0]
+
+        # 根据类型返回不同的响应
+        if result_type == "pdf":
+            # 返回 PDF 文件（文件下载，不使用统一格式）
+            return FileResponse(
+                path=str(result_file),
+                filename=result_file.name,
+                media_type="application/pdf"
+            )
+        elif result_type == "markdown":
+            # 返回 markdown 文本（纯文本，不使用统一格式）
+            from fastapi.responses import PlainTextResponse
+            content = result_file.read_text(encoding='utf-8')
+            return PlainTextResponse(content=content, media_type="text/markdown")
+        else:
+            # 返回 JSON 数据（使用统一格式）
+            import json
+            content = result_file.read_text(encoding='utf-8')
+            json_data = json.loads(content)
+
+            # tree 类型特殊处理：返回 tree 数组
+            if result_type == "tree" and isinstance(json_data, dict) and "tree" in json_data:
+                json_data = {
+                    "dataList": json_data["tree"],
+                    "summary": json_data.get("summary", {})
+                }
+            # ontology 类型特殊处理：提取 data 数组
+            elif result_type == "ontology" and isinstance(json_data, dict) and "data" in json_data:
+                json_data = {"dataList": json_data["data"]}
+            # 如果 json_data 是数组（如 model、markdown_json），包装成字典
+            elif isinstance(json_data, list):
+                json_data = {"dataList": json_data}
+
+            return PDFProcessResponse(
+                success=True,
+                errCode=None,
+                errMsg=None,
+                data=json_data
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"获取结果失败: {str(e)}")
+
+
+@router.delete("/task/{task_id}", response_model=PDFProcessResponse, summary="删除任务")
+async def delete_task(task_id: str):
+    """
+    删除任务及其所有相关文件
+
+    Args:
+        task_id: 任务ID
+
+    Returns:
+        删除结果
+    """
+    try:
+        # 1. 删除数据库/存储记录
+        db_deleted = False
+        if is_local_mode():
+            # 本地存储模式
+            try:
+                storage = get_local_storage()
+                db_deleted = storage.delete_task(task_id)
+            except Exception as e:
+                print(f"[Task Delete] Local storage delete failed: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            # MySQL 模式
+            try:
+                from tender_ontology.utils.db.mysql import get_db
+                from tender_ontology.utils.db.mysql.models import ComplianceFileTask
+
+                # 使用全局数据库连接池
+                mysql = get_db()
+
+                with mysql.get_session() as session:
+                    task = session.query(ComplianceFileTask).filter(
+                        ComplianceFileTask.id == task_id
+                    ).first()
+
+                    if task:
+                        session.delete(task)
+                        session.commit()
+                        db_deleted = True
+                        print(f"[Task Delete] DB record deleted for task_id: {task_id}")
+
+            except Exception as e:
+                print(f"[Task Delete] DB delete failed: {e}")
+                import traceback
+                traceback.print_exc()
+
+        # 2. 删除文件目录
+        files_deleted = False
+        try:
+            task_dir = get_task_upload_dir(task_id)
+
+            if task_dir.exists():
+                shutil.rmtree(task_dir)
+                files_deleted = True
+                print(f"[Task Delete] Files deleted: {task_dir}")
+
+        except Exception as e:
+            print(f"[Task Delete] Files delete failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+        # 3. 构建响应
+        if not db_deleted and not files_deleted:
+            return PDFProcessResponse(
+                success=False,
+                errCode="DELETE_001",
+                errMsg=f"任务 {task_id} 不存在或已被删除",
+                data=None
+            )
+
+        return PDFProcessResponse(
+            success=True,
+            errCode=None,
+            errMsg=None,
+            data={
+                "taskId": task_id,
+                "dbDeleted": db_deleted,
+                "filesDeleted": files_deleted,
+                "message": "任务删除成功"
+            }
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return PDFProcessResponse(
+            success=False,
+            errCode="DELETE_002",
+            errMsg=f"删除失败: {str(e)}",
+            data=None
+        )
