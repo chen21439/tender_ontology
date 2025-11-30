@@ -407,6 +407,146 @@ class FileService:
 
         return extracted
 
+    def _build_agent_and_call_onto_api(
+        self,
+        task_id: str,
+        output_dir: Path,
+        file_stem: str,
+        all_headings: list
+    ) -> Optional[Dict[str, Any]]:
+        """
+        使用 LevelTreeConstructor 构建文档树，生成 agent.json 并调用 extract_onto API
+
+        Args:
+            task_id: 任务 ID
+            output_dir: 输出目录
+            file_stem: 文件名（不含扩展名）
+            all_headings: Unstructured 提取的标题列表
+                格式: [{id, text, level, type?}, ...]
+
+        Returns:
+            包含 agent_path 和 ontology_path 的字典，或 None
+        """
+        import json
+        import time
+        import requests
+
+        try:
+            print(f"[FileService] 开始构建文档树...")
+
+            # 1. 读取 paragraph_fulltext.json（所有段落）
+            paragraph_fulltext_path = output_dir / f"{file_stem}_unstructured_paragraph_fulltext.json"
+            if not paragraph_fulltext_path.exists():
+                print(f"[FileService] 警告: {paragraph_fulltext_path.name} 不存在，跳过树构建")
+                return None
+
+            fulltext_items = json.loads(paragraph_fulltext_path.read_text(encoding='utf-8'))
+            print(f"[FileService] 读取 fulltext: {len(fulltext_items)} 个段落")
+
+            # 2. 转换 all_headings 为 model_headings 格式
+            # all_headings: [{id, text, level, type?}, ...]
+            # model_headings 需要: [{id, text, level}, ...]
+            model_headings = []
+            for h in all_headings:
+                model_headings.append({
+                    "id": h.get("id", ""),
+                    "text": h.get("text", ""),
+                    "level": h.get("level", 1)
+                })
+            print(f"[FileService] 标题数: {len(model_headings)}")
+
+            # 3. 转换 fulltext_items 为 LevelTreeConstructor 需要的格式
+            # fulltext_items: [{id, text, category, index}, ...]
+            # 需要: [{id, text, label, bboxes, page}, ...]
+            converted_fulltext = []
+            heading_ids = {h["id"] for h in model_headings}
+            for item in fulltext_items:
+                item_id = item.get("id", "")
+                # 判断是否为标题
+                is_heading = item_id in heading_ids
+                converted_fulltext.append({
+                    "id": item_id,
+                    "text": item.get("text", ""),
+                    "label": "section_header" if is_heading else "text",
+                    "bboxes": [],  # 暂时用空数组
+                    "page": None
+                })
+
+            # 4. 使用 LevelTreeConstructor 构建树
+            from tender_ontology.utils.document_struct.tree import LevelTreeConstructor
+
+            constructor = LevelTreeConstructor(verbose=True)
+            tree_result = constructor.build_tree(model_headings, converted_fulltext)
+
+            if not tree_result or "artifact" not in tree_result:
+                print(f"[FileService] 树构建失败")
+                return None
+
+            structured_data = tree_result["artifact"]
+            print(f"[FileService] 树构建完成，根节点数: {tree_result['summary'].get('root_nodes', 0)}")
+
+            # 5. 保存 _agent.json
+            agent_path = output_dir / f"{file_stem}_agent.json"
+            agent_path.write_text(
+                json.dumps(structured_data, ensure_ascii=False, indent=2),
+                encoding='utf-8'
+            )
+            print(f"[FileService] Agent JSON 已保存: {agent_path.name}")
+
+            # 6. 调用 extract_onto API
+            from tender_ontology.config.settings import settings
+
+            api_url = settings.tender_extract_api_url
+            request_data = {
+                "task_id": task_id,
+                "pdf_url": "",
+                "document_type": "",
+                "region": "",
+                "structured_data": structured_data
+            }
+
+            print(f"[FileService] 调用 extract_onto API...")
+            print(f"[FileService] URL: {api_url}")
+
+            start_time = time.time()
+            response = requests.post(
+                api_url,
+                json=request_data,
+                headers={"Content-Type": "application/json"},
+                timeout=settings.tender_extract_api_timeout
+            )
+            elapsed_time = time.time() - start_time
+
+            result = {}
+            result["agent_path"] = str(agent_path)
+
+            if response.status_code == 200:
+                api_result = response.json()
+                print(f"[FileService] extract_onto API 调用成功，耗时: {elapsed_time:.2f} 秒")
+
+                # 保存响应到 _ontology.json
+                ontology_path = output_dir / f"{file_stem}_ontology.json"
+                ontology_path.write_text(
+                    json.dumps(api_result, ensure_ascii=False, indent=2),
+                    encoding='utf-8'
+                )
+                print(f"[FileService] Ontology JSON 已保存: {ontology_path.name}")
+                result["ontology_path"] = str(ontology_path)
+            else:
+                print(f"[FileService] extract_onto API 调用失败: HTTP {response.status_code}")
+                print(f"[FileService] 响应: {response.text[:500]}")
+
+            return result
+
+        except requests.Timeout:
+            print(f"[FileService] extract_onto API 请求超时")
+            return None
+        except Exception as e:
+            print(f"[FileService] 构建文档树或调用 API 失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def _update_task_status(
         self,
         task_id: int,
