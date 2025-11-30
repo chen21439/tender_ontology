@@ -78,10 +78,10 @@ def get_task_upload_dir(task_id: str) -> Path:
 
 # ==================== 路由接口 ====================
 
-@router.post("/upload_pdf", response_model=PDFProcessResponse, summary="上传PDF文件")
+@router.post("/upload_pdf", response_model=PDFProcessResponse, summary="上传PDF/DOCX文件")
 async def upload_pdf(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(..., description="PDF文件"),
+    file: UploadFile = File(..., description="PDF或DOCX文件"),
     project_name: Optional[str] = Form(None, description="项目名称"),
     project_code: Optional[str] = Form(None, description="项目编号"),
     procurement_method: Optional[str] = Form(None, description="采购方式"),
@@ -94,36 +94,40 @@ async def upload_pdf(
     enable_docling: bool = Form(True, description="是否启用 Docling 自动处理，默认True")
 ):
     """
-    上传 PDF 文件
+    上传 PDF 或 DOCX 文件
 
     功能:
-    1. 接收 PDF 文件上传
+    1. 接收 PDF/DOCX 文件上传
     2. 生成唯一任务ID
-    3. 保存 PDF 文件到 static/uploads/{task_id}.pdf
+    3. 保存文件到 static/upload/{task_id}/{原文件名}
     4. 保存到 MySQL 数据库 (可选)
-
-    注意:
-    - 表格提取和向量化功能由 Docling 处理，此接口不涉及
-    - PDF 文件直接以任务ID命名，存储在 static/uploads/ 目录
+    5. 根据文件类型自动分发到不同处理器:
+       - PDF: Docling 处理
+       - DOCX: Unstructured + 二次判定处理
 
     返回:
         任务ID和处理结果
     """
     try:
         # 1. 验证文件类型
-        if not file.filename.lower().endswith('.pdf'):
+        filename_lower = file.filename.lower()
+        if not (filename_lower.endswith('.pdf') or filename_lower.endswith('.docx')):
             return PDFProcessResponse(
                 success=False,
-                errCode="PDF_001",
-                errMsg="只支持 PDF 文件",
+                errCode="FILE_001",
+                errMsg="只支持 PDF 和 DOCX 文件",
                 data=None
             )
 
-        print(f"[PDF Upload] ========== Start ==========")
-        print(f"[PDF Upload] Filename: {file.filename}")
-        print(f"[PDF Upload] Project: {project_name or 'None'}")
-        print(f"[PDF Upload] Save to DB: {save_to_db}")
-        print(f"[PDF Upload] ================================")
+        # 判断文件类型
+        file_type = "pdf" if filename_lower.endswith('.pdf') else "docx"
+
+        print(f"[File Upload] ========== Start ==========")
+        print(f"[File Upload] Filename: {file.filename}")
+        print(f"[File Upload] Type: {file_type}")
+        print(f"[File Upload] Project: {project_name or 'None'}")
+        print(f"[File Upload] Save to DB: {save_to_db}")
+        print(f"[File Upload] ================================")
 
         # 2. 先创建数据库记录，获取任务ID（作为唯一标识）
         task_id = None
@@ -242,37 +246,39 @@ async def upload_pdf(
                 except Exception as e:
                     print(f"[PDF Upload] DB update failed: {e}")
 
-        # 5. 触发 Docling 后台处理（如果启用）
+        # 5. 触发后台处理（如果启用）
+        # 使用 FileService 统一入口，根据文件类型自动分发
         if enable_docling:
-            from tender_ontology.services.docling.background_task import get_background_task_handler
-            import threading
+            from tender_ontology.services.file_service import get_file_service
 
-            # 获取后台任务处理器
-            task_handler = get_background_task_handler()
+            # 获取文件服务
+            file_service = get_file_service()
 
-            # 在独立线程中运行 Docling 处理（避免阻塞 FastAPI）
-            # 输出目录设置为 task_dir，这样所有文件都在同一个目录
-            thread = threading.Thread(
-                target=task_handler.process_pdf_sync,
-                args=(pdf_path, task_id, db_task_id, task_dir),  # 传递 task_dir 作为输出目录
-                daemon=False  # 非守护线程，允许任务完成后再退出
+            # 异步处理（后台线程）
+            file_service.process_file(
+                file_path=pdf_path,
+                task_id=task_id,
+                db_task_id=db_task_id,
+                output_dir=task_dir,
+                async_mode=True
             )
-            thread.start()
 
-            print(f"[PDF Upload] Docling background thread started for task_id: {task_id}")
-            print(f"[PDF Upload] Output directory: {task_dir}")
+            print(f"[File Upload] Background processing started for task_id: {task_id}")
+            print(f"[File Upload] File type: {file_type}")
+            print(f"[File Upload] Output directory: {task_dir}")
 
         # 6. 构建响应
         response_data = {
             "taskId": task_id,
             "docId": task_id,  # 使用相同的ID
             "dbTaskId": db_task_id,
-            "pdfPath": str(pdf_path),
+            "filePath": str(pdf_path),
             "fileName": file.filename,
+            "fileType": file_type,
             "projectName": project_name,
             "savedToDb": save_to_db and db_task_id is not None,
-            "doclingEnabled": enable_docling,
-            "message": "PDF 上传成功" + (", Docling 后台处理中..." if enable_docling else "")
+            "processingEnabled": enable_docling,
+            "message": f"{file_type.upper()} 上传成功" + (f", 后台处理中..." if enable_docling else "")
         }
 
         return PDFProcessResponse(
