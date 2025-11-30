@@ -5,7 +5,8 @@ Unstructured 标题提取器
 
 流程：
 1. 使用 unstructured 解析 docx，生成 _unstructured_sectionHeader_only.md 和 _unstructured_title_with_id.md
-2. 调用内部千问 API 进行两阶段标题提取
+2. 使用 DocxXmlLoader + HeadingValidator 进行二次标题判定
+3. 调用内部千问 API 进行两阶段标题提取
 """
 
 import re
@@ -17,6 +18,9 @@ from typing import List, Dict, Any, Optional, Union
 
 from unstructured.partition.docx import partition_docx
 
+from .docx_xml_loader import DocxXmlLoader, ParagraphLocator
+from .heading_validator import HeadingValidator, HeadingInfo
+
 
 class UnstructuredHeadingExtractor:
     """Unstructured 标题提取器"""
@@ -24,16 +28,22 @@ class UnstructuredHeadingExtractor:
     # 内部千问模型
     INTERNAL_MODEL = "qwen3-32b"
 
-    def __init__(self, verbose: bool = True, inspect_elements: int = 3):
+    def __init__(self, verbose: bool = True, inspect_elements: int = 3, enable_secondary_validation: bool = True):
         """
         初始化提取器
 
         Args:
             verbose: 是否打印详细信息
             inspect_elements: 解析后打印前 N 个元素的数据结构（默认3个）
+            enable_secondary_validation: 是否启用二次标题判定（默认开启）
         """
         self.verbose = verbose
         self.inspect_elements = inspect_elements
+        self.enable_secondary_validation = enable_secondary_validation
+
+        # 缓存 DocxXmlLoader 实例
+        self._xml_loader: Optional[DocxXmlLoader] = None
+        self._heading_validator: Optional[HeadingValidator] = None
 
     @property
     def INTERNAL_API_URL(self) -> str:
@@ -117,6 +127,119 @@ class UnstructuredHeadingExtractor:
 
         print(f"\n{'=' * 70}\n")
 
+    # ========== 二次标题判定 ==========
+
+    def _secondary_heading_validation(
+        self,
+        docx_path: Path,
+        elements: List
+    ) -> Dict[int, HeadingInfo]:
+        """
+        使用 DocxXmlLoader + HeadingValidator 对元素进行二次标题判定
+
+        Args:
+            docx_path: docx 文件路径
+            elements: unstructured 解析出的元素列表
+
+        Returns:
+            Dict[int, HeadingInfo]: idx -> HeadingInfo 的映射
+        """
+        if self.verbose:
+            print(f"\n{'=' * 70}")
+            print(f"[二次判定] 开始")
+            print(f"{'=' * 70}")
+            print(f"\n[Step 1] 加载 DOCX XML...")
+
+        validation_start = time.time()
+
+        # 加载 XML
+        self._xml_loader = DocxXmlLoader(docx_path, verbose=False)
+        self._xml_loader.load()
+
+        # 创建判定器
+        self._heading_validator = HeadingValidator(self._xml_loader, verbose=False)
+
+        if self.verbose:
+            print(f"  - 段落数: {len(self._xml_loader.by_index)}")
+            print(f"  - para_id 索引数: {len(self._xml_loader.by_para_id)}")
+            print(f"  - 样式数: {len(self._xml_loader.styles_map)}")
+            print(f"  - 标题样式 ID: {self._xml_loader.heading_style_ids}")
+
+        # ========== Step 2: 挑选 3 个元素进行演示 ==========
+        if self.verbose:
+            print(f"\n[Step 2] 挑选 3 个元素演示定位过程")
+            print(f"-" * 50)
+
+            demo_count = 0
+            for idx, el in enumerate(elements):
+                if demo_count >= 3:
+                    break
+
+                cat = getattr(el, "category", None) or getattr(el, "type", None)
+                text = (el.text or "").strip()
+
+                if not text or cat in ["Table", "TableChunk"]:
+                    continue
+
+                print(f"\n--- 元素 [{idx}] ---")
+                print(f"  [Unstructured 信息]")
+                print(f"    category: {cat}")
+                print(f"    text: {text[:50]}{'...' if len(text) > 50 else ''}")
+
+                # 构建 locator
+                locator_dict = {"flat_index": idx}
+                if hasattr(el, "metadata"):
+                    metadata = el.metadata
+                    if hasattr(metadata, "paragraph_locator") and metadata.paragraph_locator:
+                        locator_dict = metadata.paragraph_locator
+                        print(f"    paragraph_locator: {locator_dict}")
+                    else:
+                        print(f"    paragraph_locator: (无，使用 flat_index={idx})")
+
+                # 定位到 XML <w:p>
+                print(f"\n  [XML 定位]")
+                p = self._xml_loader.locate_paragraph(locator_dict)
+
+                if p is not None:
+                    # 获取 XML 中的文本
+                    xml_text = self._xml_loader.get_paragraph_text(p)
+                    print(f"    定位成功!")
+                    print(f"    XML 文本: {xml_text[:50]}{'...' if len(xml_text) > 50 else ''}")
+
+                    # 打印原始 XML（完整）
+                    from lxml import etree
+                    xml_str = etree.tostring(p, encoding='unicode', pretty_print=True)
+                    print(f"\n  [原始 XML]")
+                    print(xml_str)
+
+                    # 获取样式信息
+                    style = self._xml_loader.get_paragraph_style(p)
+                    print(f"\n  [样式信息]")
+                    print(f"    style_id: {style.style_id}")
+                    print(f"    style_name: {style.style_name}")
+                    print(f"    outline_level: {style.outline_level}")
+                    print(f"    is_heading_style: {style.is_heading_style}")
+                    print(f"    num_id: {style.num_id}, ilvl: {style.ilvl}")
+                else:
+                    print(f"    定位失败!")
+
+                demo_count += 1
+
+            print(f"\n{'-' * 50}")
+
+        # ========== Step 3: 暂时跳过判定逻辑，只验证 XML 读取 ==========
+        if self.verbose:
+            print(f"\n[Step 3] 跳过二次判定（验证模式）")
+
+        validation_time = time.time() - validation_start
+
+        if self.verbose:
+            print(f"  - 耗时: {validation_time:.2f} 秒")
+            print(f"\n{'=' * 70}")
+
+        # 暂时返回空，不做判定
+        return {}
+
     # ========== 阶段0：使用 unstructured 解析 docx ==========
 
     def parse_docx(
@@ -157,21 +280,51 @@ class UnstructuredHeadingExtractor:
         if self.inspect_elements > 0:
             self._print_elements_inspection(elements, self.inspect_elements)
 
-        # 提取标题类元素
+        # ========== 二次标题判定 ==========
+        secondary_headings = {}  # idx -> HeadingInfo
+        if self.enable_secondary_validation:
+            secondary_headings = self._secondary_heading_validation(docx_path, elements)
+
+        # 提取标题类元素（结合 unstructured 分类 + 二次判定）
         header_types = []
         for idx, el in enumerate(elements):
             cat = getattr(el, "category", None) or getattr(el, "type", None)
             text = (el.text or "").strip()
-            if cat in ["Title", "Header", "SectionHeader"] and text:
+            if not text:
+                continue
+
+            is_heading = False
+            heading_source = None  # 标题来源
+
+            # 1. unstructured 原始分类
+            if cat in ["Title", "Header", "SectionHeader"]:
+                is_heading = True
+                heading_source = f"unstructured:{cat}"
+
+            # 2. 二次判定结果（可能纠正或补充）
+            if idx in secondary_headings:
+                info = secondary_headings[idx]
+                if info.is_heading:
+                    is_heading = True
+                    if heading_source:
+                        heading_source += f" + secondary(L{info.heading_level}, conf={info.confidence:.2f})"
+                    else:
+                        heading_source = f"secondary(L{info.heading_level}, conf={info.confidence:.2f})"
+
+            if is_heading:
                 header_types.append({
                     "text": text,
                     "category": cat,
                     "index": idx,
-                    "id": f"unstructured-{idx}"
+                    "id": f"unstructured-{idx}",
+                    "source": heading_source,
+                    "heading_info": secondary_headings.get(idx)
                 })
 
         if self.verbose:
-            print(f"[Unstructured] 找到 {len(header_types)} 个标题类元素")
+            unstructured_count = sum(1 for h in header_types if "unstructured:" in (h.get("source") or ""))
+            secondary_count = sum(1 for h in header_types if "secondary" in (h.get("source") or "") and "unstructured:" not in (h.get("source") or ""))
+            print(f"[Unstructured] 找到 {len(header_types)} 个标题类元素 (原始: {unstructured_count}, 二次判定补充: {secondary_count})")
 
         # 输出路径
         section_header_md_path = docx_path.parent / f"{docx_path.stem}_unstructured_sectionHeader_only.md"
