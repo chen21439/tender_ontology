@@ -32,10 +32,19 @@ async def get_all_graph():
     Returns:
         包含所有节点和边的图数据
     """
+    # 先尝试导入依赖
     try:
         from tender_ontology.utils.db.neo4j import get_neo4j
         from neo4j.exceptions import ServiceUnavailable, AuthError
+    except ImportError as e:
+        return GraphResponse(
+            success=False,
+            errCode="NEO4J_NOT_INSTALLED",
+            errMsg=f"Neo4j 驱动未安装，请执行: pip install neo4j。错误: {str(e)}",
+            data=None
+        )
 
+    try:
         db = get_neo4j()
 
         # 先验证连接

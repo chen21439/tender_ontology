@@ -365,36 +365,59 @@ class UnstructuredHeadingExtractor:
 
                 f.write("\n")
 
-        # 写入 paragraph_fulltext.json (所有段落，不含表格)
-        paragraph_fulltext_path = docx_path.parent / f"{docx_path.stem}_unstructured_paragraph_fulltext.json"
-        paragraphs = []
+        # 写入 fulltext.json (所有元素，含表格)
+        fulltext_path = docx_path.parent / f"{docx_path.stem}_unstructured_fulltext.json"
+        fulltext_items = []
+        table_count = 0
         for idx, el in enumerate(elements):
             cat = getattr(el, "category", None) or getattr(el, "type", None)
             text = (el.text or "").strip()
 
-            # 排除表格相关类型
+            # 表格使用 HTML 格式保留语义
             if cat in ["Table", "TableChunk"]:
-                continue
+                # 尝试获取 text_as_html
+                html_text = None
+                if hasattr(el, "metadata") and hasattr(el.metadata, "text_as_html"):
+                    html_text = el.metadata.text_as_html
 
-            if text:
-                paragraphs.append({
+                if html_text:
+                    fulltext_items.append({
+                        "id": f"unstructured-{idx}",
+                        "text": html_text,  # 使用 HTML 格式
+                        "category": cat,
+                        "index": idx,
+                        "is_table": True
+                    })
+                    table_count += 1
+                elif text:
+                    # 没有 HTML，使用纯文本
+                    fulltext_items.append({
+                        "id": f"unstructured-{idx}",
+                        "text": text,
+                        "category": cat,
+                        "index": idx,
+                        "is_table": True
+                    })
+                    table_count += 1
+            elif text:
+                fulltext_items.append({
                     "id": f"unstructured-{idx}",
                     "text": text,
                     "category": cat,
                     "index": idx
                 })
 
-        paragraph_fulltext_path.write_text(
-            json.dumps(paragraphs, ensure_ascii=False, indent=2),
+        fulltext_path.write_text(
+            json.dumps(fulltext_items, ensure_ascii=False, indent=2),
             encoding='utf-8'
         )
 
         if self.verbose:
             print(f"[Unstructured] 已生成: {section_header_md_path.name}")
             print(f"[Unstructured] 已生成: {title_with_id_md_path.name}")
-            print(f"[Unstructured] 已生成: {paragraph_fulltext_path.name} ({len(paragraphs)} 个段落)")
+            print(f"[Unstructured] 已生成: {fulltext_path.name} ({len(fulltext_items)} 个元素, 含 {table_count} 个表格)")
 
-        return section_header_md_path, title_with_id_md_path, elements, paragraph_fulltext_path
+        return section_header_md_path, title_with_id_md_path, elements, fulltext_path
 
     # ========== 阶段1：调用千问提取一二级标题 ==========
 

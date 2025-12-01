@@ -434,14 +434,14 @@ class FileService:
         try:
             print(f"[FileService] 开始构建文档树...")
 
-            # 1. 读取 paragraph_fulltext.json（所有段落）
-            paragraph_fulltext_path = output_dir / f"{file_stem}_unstructured_paragraph_fulltext.json"
-            if not paragraph_fulltext_path.exists():
-                print(f"[FileService] 警告: {paragraph_fulltext_path.name} 不存在，跳过树构建")
+            # 1. 读取 fulltext.json（所有元素，含表格）
+            fulltext_path = output_dir / f"{file_stem}_unstructured_fulltext.json"
+            if not fulltext_path.exists():
+                print(f"[FileService] 警告: {fulltext_path.name} 不存在，跳过树构建")
                 return None
 
-            fulltext_items = json.loads(paragraph_fulltext_path.read_text(encoding='utf-8'))
-            print(f"[FileService] 读取 fulltext: {len(fulltext_items)} 个段落")
+            fulltext_items = json.loads(fulltext_path.read_text(encoding='utf-8'))
+            print(f"[FileService] 读取 fulltext: {len(fulltext_items)} 个元素")
 
             # 2. 转换 all_headings 为 model_headings 格式
             # all_headings: [{id, text, level, type?}, ...]

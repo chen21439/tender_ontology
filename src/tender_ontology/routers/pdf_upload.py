@@ -538,7 +538,7 @@ async def get_task_result(
 
     Args:
         task_id: 任务ID
-        result_type: 结果类型，支持: pdf, markdown, markdown_json, json, labeled, headers, model, fulltext, tree, level12, forward
+        result_type: 结果类型，支持: pdf, markdown, markdown_json, json, labeled, headers, model, fulltext, agent, level12, forward, ontology
 
     Returns:
         处理结果文件内容
@@ -557,7 +557,7 @@ async def get_task_result(
             "headers": "*_headers.json",
             "model": "*_model.json",
             "fulltext": "*_fulltext.json",
-            "tree": "*_agent.json",  # 优先使用 _agent.json（内部调用生成）
+            "agent": "*_agent.json",  # 内部调用生成的结构化数据
             "level12": "*_level12.json",
             "forward": "*_forward.json",
             "ontology": "*_ontology.json"  # extract_onto API 返回的结果
@@ -579,8 +579,8 @@ async def get_task_result(
                 if not (f.name.endswith("_labeled.json") or f.name.endswith("_headers.json"))
             ]
 
-        # 对于 tree 类型，如果 _agent.json 不存在，回退到 _forward.json
-        if result_type == "tree" and not result_files:
+        # 对于 agent 类型，如果 _agent.json 不存在，回退到 _forward.json
+        if result_type == "agent" and not result_files:
             result_files = list(task_dir.glob("*_forward.json"))
 
         if not result_files:
@@ -611,16 +611,10 @@ async def get_task_result(
             content = result_file.read_text(encoding='utf-8')
             json_data = json.loads(content)
 
-            # tree 类型特殊处理：返回 tree 数组
-            if result_type == "tree" and isinstance(json_data, dict) and "tree" in json_data:
-                json_data = {
-                    "dataList": json_data["tree"],
-                    "summary": json_data.get("summary", {})
-                }
             # ontology 类型特殊处理：提取 data 数组
-            elif result_type == "ontology" and isinstance(json_data, dict) and "data" in json_data:
+            if result_type == "ontology" and isinstance(json_data, dict) and "data" in json_data:
                 json_data = {"dataList": json_data["data"]}
-            # 如果 json_data 是数组（如 model、markdown_json），包装成字典
+            # 如果 json_data 是数组（如 agent、model、markdown_json），包装成字典
             elif isinstance(json_data, list):
                 json_data = {"dataList": json_data}
 

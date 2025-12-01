@@ -113,7 +113,7 @@ async def serve_spa(full_path: str):
     排除 API、静态文件、文档等路径
     """
     # 排除后端路径
-    excluded_prefixes = ("api/", "static/", "docs", "openapi", "redoc", "health")
+    excluded_prefixes = ("api/", "static/", "docs", "openapi", "redoc", "health", "AI-document/", "python/")
     if full_path.startswith(excluded_prefixes):
         # 返回 None 会导致 404，让 FastAPI 继续匹配其他路由
         from fastapi import HTTPException
