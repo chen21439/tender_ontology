@@ -553,28 +553,293 @@ class DocxPdfClient:
             }
 
 
+# ============== Aspose Words API 客户端 ==============
+
+class AsposeWordsClient:
+    """
+    Aspose Words Cloud API 客户端
+
+    用于 DOCX 转 PDF 等文档转换操作
+    直接使用传入的 Bearer Token，无需 OAuth 流程
+
+    API 文档: https://docs.aspose.cloud/words/
+    """
+
+    # API 端点
+    API_BASE_URL = "https://api.aspose.cloud/v4.0/words"
+
+    def __init__(
+        self,
+        access_token: str,
+        timeout: float = 120.0,
+        verbose: bool = True
+    ):
+        """
+        初始化 Aspose Words 客户端
+
+        Args:
+            access_token: Bearer Token（已获取好的 access token）
+            timeout: 请求超时时间（秒）
+            verbose: 是否打印详细日志
+        """
+        self.access_token = access_token
+        self.timeout = timeout
+        self.verbose = verbose
+
+    def _log(self, message: str):
+        """打印日志"""
+        if self.verbose:
+            print(f"[AsposeWords] {message}")
+
+    def convert_docx_to_pdf(
+        self,
+        docx_path: Union[str, Path],
+        output_path: Optional[Union[str, Path]] = None,
+        compliance: str = "Pdf17"
+    ) -> Dict[str, Any]:
+        """
+        将 DOCX 转换为 PDF
+
+        使用 Aspose Words Cloud API 的 saveAs 接口
+
+        Args:
+            docx_path: DOCX 文件路径
+            output_path: 输出 PDF 路径（可选，默认同目录同名 .pdf）
+            compliance: PDF 合规性标准
+                - "Pdf17": PDF 1.7 (默认)
+                - "PdfA1a": PDF/A-1a
+                - "PdfA1b": PDF/A-1b
+                - "PdfA2a": PDF/A-2a
+                - "PdfA2u": PDF/A-2u
+                - "PdfA4": PDF/A-4
+                - "PdfUa1": PDF/UA-1
+
+        Returns:
+            {
+                "success": bool,
+                "output_path": Path,
+                "file_size": int,
+                "error": str (if failed)
+            }
+        """
+        docx_path = Path(docx_path)
+
+        if not docx_path.exists():
+            return {"success": False, "error": f"文件不存在: {docx_path}"}
+
+        # 确定输出路径
+        if output_path is None:
+            output_path = docx_path.with_suffix(".pdf")
+        else:
+            output_path = Path(output_path)
+
+        # 确保输出目录存在
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        self._log(f"开始转换: {docx_path.name} -> {output_path.name}")
+
+        # 构建保存选项
+        save_options = {
+            "SaveFormat": "pdf",
+            "FileName": output_path.name,
+            "Compliance": compliance,
+            # 导出文档结构
+            "ExportDocumentStructure": True,
+            # 导出所有书签为 PDF 大纲/书签（级别 1 表示全部导出）
+            "BookmarksOutlineLevel": 1,
+            # 不导出标题为大纲（只要书签）
+            "HeadingsOutlineLevels": 0
+        }
+
+        self._log(f"SaveOptions:")
+        for key, value in save_options.items():
+            self._log(f"  {key}: {value}")
+
+        # 发送请求
+        url = f"{self.API_BASE_URL}/online/put/saveAs"
+
+        try:
+            import json as json_module
+            from requests_toolbelt import MultipartEncoder
+
+            # 构建 multipart/form-data 请求
+            # 按 curl 的 --form 顺序：先 document，后 saveOptionsData
+            save_options_json = json_module.dumps(save_options)
+
+            with open(docx_path, "rb") as f:
+                file_content = f.read()
+
+            # 使用 MultipartEncoder 确保字段顺序和格式正确
+            multipart_data = MultipartEncoder(
+                fields={
+                    'document': (docx_path.name, file_content, 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'),
+                    'saveOptionsData': save_options_json
+                }
+            )
+
+            response = requests.put(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.access_token}",
+                    "Content-Type": multipart_data.content_type
+                },
+                data=multipart_data,
+                timeout=self.timeout
+            )
+
+            if response.status_code == 200:
+                # 成功，保存 PDF
+                with open(output_path, "wb") as out_f:
+                    out_f.write(response.content)
+
+                file_size = output_path.stat().st_size
+                self._log(f"转换成功: {output_path.name} ({file_size} bytes)")
+
+                return {
+                    "success": True,
+                    "output_path": output_path,
+                    "file_size": file_size
+                }
+
+            else:
+                error_msg = f"HTTP {response.status_code}: {response.text[:500]}"
+                self._log(f"转换失败: {error_msg}")
+                return {"success": False, "error": error_msg}
+
+        except requests.Timeout:
+            self._log("请求超时")
+            return {"success": False, "error": f"请求超时（{self.timeout}秒）"}
+
+        except Exception as e:
+            self._log(f"转换异常: {e}")
+            return {"success": False, "error": str(e)}
+
+    def convert_docx_to_pdf_with_retry(
+        self,
+        docx_path: Union[str, Path],
+        output_path: Optional[Union[str, Path]] = None,
+        compliance: str = "Pdf17",
+        max_retries: int = 3,
+        retry_delay: float = 2.0
+    ) -> Dict[str, Any]:
+        """
+        带重试的 DOCX 转 PDF
+
+        Args:
+            docx_path: DOCX 文件路径
+            output_path: 输出 PDF 路径
+            compliance: PDF 合规性标准
+            max_retries: 最大重试次数
+            retry_delay: 重试延迟（秒）
+
+        Returns:
+            与 convert_docx_to_pdf 相同
+        """
+        last_error = None
+        for attempt in range(max_retries):
+            if attempt > 0:
+                self._log(f"重试 {attempt}/{max_retries - 1}...")
+                time.sleep(retry_delay)
+
+            result = self.convert_docx_to_pdf(
+                docx_path=docx_path,
+                output_path=output_path,
+                compliance=compliance
+            )
+
+            if result["success"]:
+                return result
+
+            last_error = result.get("error")
+            self._log(f"尝试 {attempt + 1} 失败: {last_error}")
+
+        return {"success": False, "error": f"已重试 {max_retries} 次: {last_error}"}
+
+
+def get_aspose_client(access_token: Optional[str] = None) -> Optional[AsposeWordsClient]:
+    """
+    获取 Aspose Words 客户端实例
+
+    Args:
+        access_token: Bearer Token，如不提供则从配置读取
+
+    Returns:
+        AsposeWordsClient 实例，如果 token 不存在则返回 None
+    """
+    try:
+        if not access_token:
+            from tender_ontology.config.settings import settings
+            access_token = getattr(settings, 'aspose_access_token', None)
+
+        if not access_token:
+            print("[AsposeWords] 未提供 access_token")
+            return None
+
+        return AsposeWordsClient(
+            access_token=access_token,
+            verbose=True
+        )
+
+    except Exception as e:
+        print(f"[AsposeWords] 初始化失败: {e}")
+        return None
+
+
 # ============== 命令行测试 ==============
 
 if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("用法: python http_client.py <docx_path> [output_dir]")
-        print("示例: python http_client.py test.docx ./output")
+        print("用法: python http_client.py <command> [args...]")
+        print()
+        print("命令:")
+        print("  docx-pdf <docx_path> [output_dir]  - 使用本地服务转换")
+        print("  aspose <docx_path> [output_path]   - 使用 Aspose Cloud 转换")
+        print()
+        print("示例:")
+        print("  python http_client.py docx-pdf test.docx ./output")
+        print("  python http_client.py aspose test.docx test.pdf")
         sys.exit(1)
 
-    docx_path = Path(sys.argv[1])
-    output_dir = Path(sys.argv[2]) if len(sys.argv) > 2 else docx_path.parent
+    command = sys.argv[1]
 
-    client = DocxPdfClient(
-        base_url="http://localhost:8080",
-        verbose=True
-    )
+    if command == "docx-pdf":
+        docx_path = Path(sys.argv[2])
+        output_dir = Path(sys.argv[3]) if len(sys.argv) > 3 else docx_path.parent
 
-    result = client.process_and_download(
-        docx_path=docx_path,
-        output_dir=output_dir,
-        include_mcid=True
-    )
+        client = DocxPdfClient(
+            base_url="http://localhost:8080",
+            verbose=True
+        )
 
-    print(f"\n结果: {result}")
+        result = client.process_and_download(
+            docx_path=docx_path,
+            output_dir=output_dir,
+            include_mcid=True
+        )
+
+        print(f"\n结果: {result}")
+
+    elif command == "aspose":
+        docx_path = Path(sys.argv[2])
+        output_path = Path(sys.argv[3]) if len(sys.argv) > 3 else None
+
+        client = get_aspose_client()
+        if client is None:
+            print("请配置 ASPOSE_CLIENT_ID 和 ASPOSE_CLIENT_SECRET 环境变量")
+            sys.exit(1)
+
+        try:
+            result_path = client.convert_docx_to_pdf(
+                docx_path=docx_path,
+                output_path=output_path
+            )
+            print(f"\n转换成功: {result_path}")
+        except Exception as e:
+            print(f"\n转换失败: {e}")
+            sys.exit(1)
+
+    else:
+        print(f"未知命令: {command}")
+        sys.exit(1)

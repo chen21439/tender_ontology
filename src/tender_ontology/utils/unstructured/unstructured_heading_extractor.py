@@ -127,6 +127,253 @@ class UnstructuredHeadingExtractor:
 
         print(f"\n{'=' * 70}\n")
 
+    # ========== 批量 XML 提取 ==========
+
+    def batch_extract_xml(
+        self,
+        docx_path: Union[str, Path],
+        elements: List,
+        include_raw_xml: bool = False
+    ) -> List[Dict[str, Any]]:
+        """
+        批量提取 unstructured 元素对应的 DOCX XML 信息
+
+        只打开一次 DOCX 文件，根据每个元素的 metadata.paragraph_locator 定位到 <w:p>，
+        提取样式信息、文本等。
+
+        Args:
+            docx_path: docx 文件路径
+            elements: unstructured 解析出的元素列表
+            include_raw_xml: 是否包含原始 XML 字符串（默认 False，减少内存占用）
+
+        Returns:
+            List[Dict]: 每个元素的 XML 信息
+            [
+                {
+                    "index": 0,                    # 元素在 elements 中的索引
+                    "category": "Title",           # unstructured 分类
+                    "text": "第一章 ...",          # 元素文本
+                    "located": True,               # 是否成功定位到 XML
+                    "style_id": "Heading1",        # 样式 ID
+                    "style_name": "标题 1",        # 样式名称
+                    "outline_level": 0,            # 大纲级别
+                    "is_heading_style": True,      # 是否标题样式
+                    "num_id": "1",                 # 编号 ID
+                    "ilvl": "0",                   # 编号层级
+                    "xml_text": "第一章 ...",      # XML 中的文本
+                    "raw_xml": "<w:p>...</w:p>",   # 原始 XML（可选）
+                    "locator": {...}               # 定位信息
+                },
+                ...
+            ]
+        """
+        docx_path = Path(docx_path)
+
+        if self.verbose:
+            print(f"\n{'=' * 70}")
+            print(f"[批量 XML 提取] 开始")
+            print(f"{'=' * 70}")
+            print(f"  - 文件: {docx_path.name}")
+            print(f"  - 元素数: {len(elements)}")
+            print(f"  - 包含原始 XML: {include_raw_xml}")
+
+        extract_start = time.time()
+
+        # 加载 DOCX XML（只打开一次）
+        if self._xml_loader is None or str(self._xml_loader.docx_path) != str(docx_path):
+            self._xml_loader = DocxXmlLoader(docx_path, verbose=False)
+            self._xml_loader.load()
+
+        if self.verbose:
+            print(f"\n  [DOCX XML 已加载]")
+            print(f"    - 段落数: {len(self._xml_loader.by_index)}")
+            print(f"    - para_id 索引数: {len(self._xml_loader.by_para_id)}")
+            print(f"    - 样式数: {len(self._xml_loader.styles_map)}")
+
+        results = []
+        located_count = 0
+        skipped_count = 0
+
+        for idx, el in enumerate(elements):
+            cat = getattr(el, "category", None) or getattr(el, "type", None)
+            text = (el.text or "").strip()
+
+            # 跳过表格
+            if cat in ["Table", "TableChunk"]:
+                skipped_count += 1
+                continue
+
+            # 构建结果
+            result = {
+                "index": idx,
+                "category": cat,
+                "text": text[:200] if text else "",  # 截断长文本
+                "located": False,
+                "style_id": None,
+                "style_name": None,
+                "outline_level": None,
+                "is_heading_style": False,
+                "alignment": None,  # 对齐方式: left, center, right, both
+                "num_id": None,
+                "ilvl": None,
+                "xml_text": None,
+                "locator": None
+            }
+
+            # 获取 locator
+            locator_dict = {"flat_index": idx}
+            if hasattr(el, "metadata"):
+                metadata = el.metadata
+                if hasattr(metadata, "paragraph_locator") and metadata.paragraph_locator:
+                    locator_dict = metadata.paragraph_locator
+                    result["locator"] = locator_dict
+
+            # 定位到 XML <w:p>
+            p = self._xml_loader.locate_paragraph(locator_dict)
+
+            if p is not None:
+                result["located"] = True
+                located_count += 1
+
+                # 获取 XML 中的文本
+                xml_text = self._xml_loader.get_paragraph_text(p)
+                result["xml_text"] = xml_text[:200] if xml_text else ""
+
+                # 获取样式信息
+                style = self._xml_loader.get_paragraph_style(p)
+                result["style_id"] = style.style_id
+                result["style_name"] = style.style_name
+                result["outline_level"] = style.outline_level
+                result["alignment"] = style.alignment
+                result["num_id"] = style.num_id
+                result["ilvl"] = style.ilvl
+
+                # 判断是否是标题：原始标题样式 或 居中对齐
+                is_heading = style.is_heading_style
+                if style.alignment == "center":
+                    is_heading = True
+                result["is_heading_style"] = is_heading
+
+                # 原始 XML（可选）
+                if include_raw_xml:
+                    from lxml import etree
+                    result["raw_xml"] = etree.tostring(p, encoding='unicode', pretty_print=True)
+
+            results.append(result)
+
+        extract_time = time.time() - extract_start
+
+        if self.verbose:
+            print(f"\n  [提取完成]")
+            print(f"    - 处理元素: {len(results)}")
+            print(f"    - 成功定位: {located_count}")
+            print(f"    - 跳过表格: {skipped_count}")
+            print(f"    - 耗时: {extract_time:.2f} 秒")
+            print(f"{'=' * 70}\n")
+
+        return results
+
+    @staticmethod
+    def batch_extract_xml_from_docx(
+        docx_path: Union[str, Path],
+        include_raw_xml: bool = False,
+        verbose: bool = True
+    ) -> Dict[str, Any]:
+        """
+        静态方法：从 DOCX 批量提取所有元素的 XML 信息
+
+        一站式方法：先用 unstructured 解析，再批量提取 XML。
+
+        Args:
+            docx_path: docx 文件路径
+            include_raw_xml: 是否包含原始 XML 字符串
+            verbose: 是否打印详细信息
+
+        Returns:
+            {
+                "elements": [...],       # unstructured 元素（原始）
+                "xml_info": [...],       # 批量提取的 XML 信息
+                "stats": {
+                    "total_elements": int,
+                    "located_count": int,
+                    "heading_count": int,
+                    "parse_time": float,
+                    "extract_time": float
+                }
+            }
+
+        使用示例:
+            from tender_ontology.utils.unstructured import UnstructuredHeadingExtractor
+
+            result = UnstructuredHeadingExtractor.batch_extract_xml_from_docx(
+                "input.docx",
+                include_raw_xml=True
+            )
+
+            for item in result["xml_info"]:
+                if item["located"] and item["is_heading_style"]:
+                    print(f"标题: {item['text']}, 样式: {item['style_name']}")
+        """
+        docx_path = Path(docx_path)
+
+        if verbose:
+            print(f"\n{'=' * 70}")
+            print(f"[批量 XML 提取] 一站式处理")
+            print(f"{'=' * 70}")
+            print(f"  - 输入文件: {docx_path.name}")
+
+        total_start = time.time()
+
+        # Step 1: 使用 unstructured 解析
+        parse_start = time.time()
+        elements = partition_docx(str(docx_path))
+        parse_time = time.time() - parse_start
+
+        if verbose:
+            print(f"\n  [Step 1] Unstructured 解析完成")
+            print(f"    - 元素数: {len(elements)}")
+            print(f"    - 耗时: {parse_time:.2f} 秒")
+
+        # Step 2: 批量提取 XML
+        extract_start = time.time()
+
+        extractor = UnstructuredHeadingExtractor(verbose=False)
+        xml_info = extractor.batch_extract_xml(
+            docx_path,
+            elements,
+            include_raw_xml=include_raw_xml
+        )
+        extract_time = time.time() - extract_start
+
+        # 统计
+        located_count = sum(1 for item in xml_info if item["located"])
+        heading_count = sum(1 for item in xml_info if item["is_heading_style"])
+
+        if verbose:
+            print(f"\n  [Step 2] XML 提取完成")
+            print(f"    - 定位成功: {located_count}/{len(xml_info)}")
+            print(f"    - 标题样式: {heading_count}")
+            print(f"    - 耗时: {extract_time:.2f} 秒")
+
+        total_time = time.time() - total_start
+
+        if verbose:
+            print(f"\n  [总耗时] {total_time:.2f} 秒")
+            print(f"{'=' * 70}\n")
+
+        return {
+            "elements": elements,
+            "xml_info": xml_info,
+            "stats": {
+                "total_elements": len(elements),
+                "located_count": located_count,
+                "heading_count": heading_count,
+                "parse_time": parse_time,
+                "extract_time": extract_time,
+                "total_time": total_time
+            }
+        }
+
     # ========== 二次标题判定 ==========
 
     def _secondary_heading_validation(
@@ -280,12 +527,19 @@ class UnstructuredHeadingExtractor:
         if self.inspect_elements > 0:
             self._print_elements_inspection(elements, self.inspect_elements)
 
+        # ========== 批量提取 XML 信息（获取 alignment 等属性）==========
+        xml_info_map = {}  # idx -> xml_info
+        if self.enable_secondary_validation:
+            xml_info_list = self.batch_extract_xml(docx_path, elements, include_raw_xml=False)
+            for info in xml_info_list:
+                xml_info_map[info["index"]] = info
+
         # ========== 二次标题判定 ==========
         secondary_headings = {}  # idx -> HeadingInfo
         if self.enable_secondary_validation:
             secondary_headings = self._secondary_heading_validation(docx_path, elements)
 
-        # 提取标题类元素（结合 unstructured 分类 + 二次判定）
+        # 提取标题类元素（结合 unstructured 分类 + 二次判定 + 居中对齐）
         header_types = []
         for idx, el in enumerate(elements):
             cat = getattr(el, "category", None) or getattr(el, "type", None)
@@ -295,13 +549,27 @@ class UnstructuredHeadingExtractor:
 
             is_heading = False
             heading_source = None  # 标题来源
+            alignment = None  # 对齐方式
+
+            # 获取 XML 信息
+            xml_info = xml_info_map.get(idx, {})
+            if xml_info:
+                alignment = xml_info.get("alignment")
 
             # 1. unstructured 原始分类
             if cat in ["Title", "Header", "SectionHeader"]:
                 is_heading = True
                 heading_source = f"unstructured:{cat}"
 
-            # 2. 二次判定结果（可能纠正或补充）
+            # 2. 居中对齐判定为标题
+            if alignment == "center":
+                if not is_heading:
+                    is_heading = True
+                    heading_source = "align:center"
+                else:
+                    heading_source += " + align:center"
+
+            # 3. 二次判定结果（可能纠正或补充）
             if idx in secondary_headings:
                 info = secondary_headings[idx]
                 if info.is_heading:
@@ -316,8 +584,9 @@ class UnstructuredHeadingExtractor:
                     "text": text,
                     "category": cat,
                     "index": idx,
-                    "id": f"unstructured-{idx}",
+                    "id": f"P_{idx:05d}",
                     "source": heading_source,
+                    "alignment": alignment,
                     "heading_info": secondary_headings.get(idx)
                 })
 
@@ -338,7 +607,11 @@ class UnstructuredHeadingExtractor:
 
             for item in header_types:
                 if include_metadata:
-                    f.write(f"- [{item['category']}] {item['text']} {{id={item['id']}}}\n")
+                    # 构建属性字符串：{id=xxx} 或 {id=xxx, align=center}
+                    attrs = f"id={item['id']}"
+                    if item.get('alignment') == 'center':
+                        attrs += ", align=center"
+                    f.write(f"- [{item['category']}] {item['text']} {{{attrs}}}\n")
                 else:
                     f.write(f"- {item['text']}\n")
 
@@ -350,8 +623,12 @@ class UnstructuredHeadingExtractor:
 
             for item in header_types:
                 idx = item['index']
+                # 构建属性字符串：{id=xxx} 或 {id=xxx, align=center}
+                attrs = f"id={item['id']}"
+                if item.get('alignment') == 'center':
+                    attrs += ", align=center"
                 # 写入标题
-                f.write(f"## [{item['category']}] {item['text']} {{id={item['id']}}}\n\n")
+                f.write(f"## [{item['category']}] {item['text']} {{{attrs}}}\n\n")
 
                 # 获取下方内容（下一个元素）
                 if idx + 1 < len(elements):
@@ -369,20 +646,25 @@ class UnstructuredHeadingExtractor:
         fulltext_path = docx_path.parent / f"{docx_path.stem}_unstructured_fulltext.json"
         fulltext_items = []
         table_count = 0
+        paragraph_count = 0  # 表格外段落计数
+
         for idx, el in enumerate(elements):
             cat = getattr(el, "category", None) or getattr(el, "type", None)
             text = (el.text or "").strip()
 
-            # 表格使用 HTML 格式保留语义
+            # 表格使用 tNNN-rNNN-cNNN-pNNN 格式（3位数）
             if cat in ["Table", "TableChunk"]:
                 # 尝试获取 text_as_html
                 html_text = None
                 if hasattr(el, "metadata") and hasattr(el.metadata, "text_as_html"):
                     html_text = el.metadata.text_as_html
 
+                # 表格 ID: tNNN-r000-c000-p000（表格索引，行列段落暂为0）
+                table_id = f"t{table_count:03d}-r000-c000-p000"
+
                 if html_text:
                     fulltext_items.append({
-                        "id": f"unstructured-{idx}",
+                        "id": table_id,
                         "text": html_text,  # 使用 HTML 格式
                         "category": cat,
                         "index": idx,
@@ -392,7 +674,7 @@ class UnstructuredHeadingExtractor:
                 elif text:
                     # 没有 HTML，使用纯文本
                     fulltext_items.append({
-                        "id": f"unstructured-{idx}",
+                        "id": table_id,
                         "text": text,
                         "category": cat,
                         "index": idx,
@@ -400,12 +682,14 @@ class UnstructuredHeadingExtractor:
                     })
                     table_count += 1
             elif text:
+                # 表格外段落使用 P_NNNNN 格式（5位数）
                 fulltext_items.append({
-                    "id": f"unstructured-{idx}",
+                    "id": f"P_{paragraph_count:05d}",
                     "text": text,
                     "category": cat,
                     "index": idx
                 })
+                paragraph_count += 1
 
         fulltext_path.write_text(
             json.dumps(fulltext_items, ensure_ascii=False, indent=2),
@@ -457,20 +741,20 @@ class UnstructuredHeadingExtractor:
 
 **示例一（存在册/部分结构）：**
 ```markdown
-# 第一册 专用条款 {id=unstructured-61}
-## 第一章 招标公告 {id=unstructured-100}
-## 第二章 投标须知 {id=unstructured-150}
-# 第二册 通用条款 {id=unstructured-200}
-## 第一章 总则 {id=unstructured-210}
+# 第一册 专用条款 {id=P_00061}
+## 第一章 招标公告 {id=P_00100}
+## 第二章 投标须知 {id=P_00150}
+# 第二册 通用条款 {id=P_00200}
+## 第一章 总则 {id=P_00210}
 ```
 
 **示例二（无册/部分结构，章为顶层）：**
 ```markdown
-# 第一章 招标公告 {id=unstructured-10}
-## 一、项目概况 {id=unstructured-15}
-## 二、投标人资格要求 {id=unstructured-20}
-# 第二章 投标须知 {id=unstructured-50}
-## 一、投标文件的编制 {id=unstructured-55}
+# 第一章 招标公告 {id=P_00010}
+## 一、项目概况 {id=P_00015}
+## 二、投标人资格要求 {id=P_00020}
+# 第二章 投标须知 {id=P_00050}
+## 一、投标文件的编制 {id=P_00055}
 ```
 
 现在，请找出文档中所有的一级标题和二级标题。"""
@@ -712,11 +996,11 @@ class UnstructuredHeadingExtractor:
 
 ## 输出示例
 ```markdown
-# 第一章 招标公告 {id=unstructured-100}
-## 一、项目概况 {id=unstructured-105}
-### 1. 项目名称 {id=unstructured-106}
-### 2. 项目编号 {id=unstructured-107}
-## 二、投标人资格要求 {id=unstructured-120}
+# 第一章 招标公告 {id=P_00100}
+## 一、项目概况 {id=P_00105}
+### 1. 项目名称 {id=P_00106}
+### 2. 项目编号 {id=P_00107}
+## 二、投标人资格要求 {id=P_00120}
 ```
 
 现在，请分析以下章节内容，识别所有标题及其层级。"""

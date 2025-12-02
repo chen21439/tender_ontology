@@ -47,6 +47,7 @@ class ParagraphStyle:
     ilvl: Optional[str] = None              # numPr/ilvl (编号层级)
     based_on: Optional[str] = None          # 基于哪个样式
     is_heading_style: bool = False          # 是否是标题样式
+    alignment: Optional[str] = None         # 对齐方式: left, center, right, both(两端对齐)
 
 
 class DocxXmlLoader:
@@ -322,6 +323,11 @@ class DocxXmlLoader:
                 style.num_id = numId.get("{%s}val" % OOXML_NS["w"])
             if ilvl is not None:
                 style.ilvl = ilvl.get("{%s}val" % OOXML_NS["w"])
+
+        # jc (对齐方式): left, center, right, both(两端对齐), distribute(分散对齐)
+        jc = pPr.find("w:jc", namespaces=OOXML_NS)
+        if jc is not None:
+            style.alignment = jc.get("{%s}val" % OOXML_NS["w"])
 
         return style
 

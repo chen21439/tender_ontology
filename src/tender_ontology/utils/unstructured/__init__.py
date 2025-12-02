@@ -12,6 +12,7 @@ __all__ = [
     "extract_titles_to_txt",
     "is_probably_title",
     "UnstructuredHeadingExtractor",
+    "batch_extract_xml_from_docx",
 ]
 
 
@@ -27,4 +28,7 @@ def __getattr__(name):
     elif name == "UnstructuredHeadingExtractor":
         from .unstructured_heading_extractor import UnstructuredHeadingExtractor
         return UnstructuredHeadingExtractor
+    elif name == "batch_extract_xml_from_docx":
+        from .unstructured_heading_extractor import UnstructuredHeadingExtractor
+        return UnstructuredHeadingExtractor.batch_extract_xml_from_docx
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
