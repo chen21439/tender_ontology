@@ -5,13 +5,18 @@ FastAPI application entry point for tender ontology service.
 from pathlib import Path
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from tender_ontology.routers import health, ontology, pdf_upload, knowledge_graph
 from tender_ontology.utils.db.local_storage import is_local_mode
+
+# 调试日志
+import logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
@@ -77,11 +82,27 @@ STATIC_DIR = PROJECT_ROOT / "static"
 STATIC_DIR.mkdir(exist_ok=True)
 FRONT_DIR = STATIC_DIR / "AI-document"
 
+# 启动时打印路径信息 (使用 print 确保输出)
+print(f"[Init] __file__ = {__file__}")
+print(f"[Init] PROJECT_ROOT = {PROJECT_ROOT} (exists={PROJECT_ROOT.exists()})")
+print(f"[Init] STATIC_DIR = {STATIC_DIR} (exists={STATIC_DIR.exists()})")
+print(f"[Init] FRONT_DIR = {FRONT_DIR} (exists={FRONT_DIR.exists()})")
+
+# 列出 FRONT_DIR 目录内容（如果存在）
+if FRONT_DIR.exists():
+    files = list(FRONT_DIR.iterdir())[:10]  # 只显示前10个
+    print(f"[Init] FRONT_DIR contents: {[f.name for f in files]}")
+
 # 挂载静态文件目录
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+print(f"[Init] Mounted /static -> {STATIC_DIR}")
+
 # 挂载前端目录（可通过 /AI-document/... 访问，不带 static 前缀）
 if FRONT_DIR.exists():
     app.mount("/AI-document", StaticFiles(directory=str(FRONT_DIR), html=True), name="frontend")
+    print(f"[Init] Mounted /AI-document -> {FRONT_DIR}")
+else:
+    print(f"[Init] WARNING: FRONT_DIR not exists, skip mounting /AI-document")
 
 
 @app.get("/")
@@ -112,18 +133,23 @@ async def serve_spa(full_path: str):
     对于前端路由（如 /task/123），返回 index.html 由前端 JS 处理
     排除 API、静态文件、文档等路径
     """
+    logger.debug(f"[serve_spa] 收到请求: full_path='{full_path}'")
+
     # 排除后端路径
-    excluded_prefixes = ("api/", "static/", "docs", "openapi", "redoc", "health", "AI-document/", "python/")
+    excluded_prefixes = ("api/", "static/", "docs", "openapi", "redoc", "health")
     if full_path.startswith(excluded_prefixes):
-        # 返回 None 会导致 404，让 FastAPI 继续匹配其他路由
+        logger.debug(f"[serve_spa] 路径匹配 excluded_prefixes，返回 404")
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Not found")
 
     # 返回前端入口文件
     index_file = FRONT_DIR / "index.html"
+    logger.debug(f"[serve_spa] FRONT_DIR={FRONT_DIR}, index_file={index_file}, exists={index_file.exists()}")
     if index_file.exists():
+        logger.debug(f"[serve_spa] 返回 index.html")
         return FileResponse(str(index_file))
 
     # 前端文件不存在，返回 404
+    logger.debug(f"[serve_spa] index.html 不存在，返回 404")
     from fastapi import HTTPException
     raise HTTPException(status_code=404, detail="Not found")
