@@ -544,7 +544,71 @@ class UnstructuredHeadingExtractor:
         if self.enable_secondary_validation:
             secondary_headings = self._secondary_heading_validation(docx_path, elements)
 
-        # 提取标题类元素（结合 unstructured 分类 + 二次判定 + 居中对齐）
+        # ========== 先构建 fulltext，获取正确的 ID 映射 ==========
+        # 写入 fulltext.json (所有元素，含表格)
+        fulltext_path = docx_path.parent / f"{docx_path.stem}_unstructured_fulltext.json"
+        fulltext_items = []
+        table_count = 0
+        paragraph_count = 0  # 表格外段落计数
+
+        # 建立 element index -> paragraph ID 的映射
+        idx_to_paragraph_id = {}  # idx -> "P_NNNNN" or "tNNN-..."
+
+        for idx, el in enumerate(elements):
+            cat = getattr(el, "category", None) or getattr(el, "type", None)
+            text = (el.text or "").strip()
+
+            # 表格使用 tNNN-rNNN-cNNN-pNNN 格式（3位数）
+            if cat in ["Table", "TableChunk"]:
+                # 尝试获取 text_as_html
+                html_text = None
+                if hasattr(el, "metadata") and hasattr(el.metadata, "text_as_html"):
+                    html_text = el.metadata.text_as_html
+
+                # 表格 ID: tNNN-r000-c000-p000（表格索引，行列段落暂为0）
+                table_id = f"t{table_count:03d}-r000-c000-p000"
+                idx_to_paragraph_id[idx] = table_id
+
+                if html_text:
+                    fulltext_items.append({
+                        "id": table_id,
+                        "text": html_text,  # 使用 HTML 格式
+                        "category": cat,
+                        "index": idx,
+                        "is_table": True
+                    })
+                    table_count += 1
+                elif text:
+                    # 没有 HTML，使用纯文本
+                    fulltext_items.append({
+                        "id": table_id,
+                        "text": text,
+                        "category": cat,
+                        "index": idx,
+                        "is_table": True
+                    })
+                    table_count += 1
+            elif text:
+                # 表格外段落使用 P_NNNNN 格式（5位数）
+                para_id = f"P_{paragraph_count:05d}"
+                idx_to_paragraph_id[idx] = para_id
+                fulltext_items.append({
+                    "id": para_id,
+                    "text": text,
+                    "category": cat,
+                    "index": idx
+                })
+                paragraph_count += 1
+
+        fulltext_path.write_text(
+            json.dumps(fulltext_items, ensure_ascii=False, indent=2),
+            encoding='utf-8'
+        )
+
+        if self.verbose:
+            print(f"[Unstructured] 已生成: {fulltext_path.name} ({len(fulltext_items)} 个元素, 含 {table_count} 个表格)")
+
+        # ========== 提取标题类元素（使用 fulltext 中的 ID）==========
         header_types = []
         for idx, el in enumerate(elements):
             cat = getattr(el, "category", None) or getattr(el, "type", None)
@@ -585,11 +649,13 @@ class UnstructuredHeadingExtractor:
                         heading_source = f"secondary(L{info.heading_level}, conf={info.confidence:.2f})"
 
             if is_heading:
+                # 使用 fulltext 中的 ID（确保一致性）
+                para_id = idx_to_paragraph_id.get(idx, f"P_{idx:05d}")
                 header_types.append({
                     "text": text,
                     "category": cat,
                     "index": idx,
-                    "id": f"P_{idx:05d}",
+                    "id": para_id,
                     "source": heading_source,
                     "alignment": alignment,
                     "heading_info": secondary_headings.get(idx)
@@ -647,64 +713,9 @@ class UnstructuredHeadingExtractor:
 
                 f.write("\n")
 
-        # 写入 fulltext.json (所有元素，含表格)
-        fulltext_path = docx_path.parent / f"{docx_path.stem}_unstructured_fulltext.json"
-        fulltext_items = []
-        table_count = 0
-        paragraph_count = 0  # 表格外段落计数
-
-        for idx, el in enumerate(elements):
-            cat = getattr(el, "category", None) or getattr(el, "type", None)
-            text = (el.text or "").strip()
-
-            # 表格使用 tNNN-rNNN-cNNN-pNNN 格式（3位数）
-            if cat in ["Table", "TableChunk"]:
-                # 尝试获取 text_as_html
-                html_text = None
-                if hasattr(el, "metadata") and hasattr(el.metadata, "text_as_html"):
-                    html_text = el.metadata.text_as_html
-
-                # 表格 ID: tNNN-r000-c000-p000（表格索引，行列段落暂为0）
-                table_id = f"t{table_count:03d}-r000-c000-p000"
-
-                if html_text:
-                    fulltext_items.append({
-                        "id": table_id,
-                        "text": html_text,  # 使用 HTML 格式
-                        "category": cat,
-                        "index": idx,
-                        "is_table": True
-                    })
-                    table_count += 1
-                elif text:
-                    # 没有 HTML，使用纯文本
-                    fulltext_items.append({
-                        "id": table_id,
-                        "text": text,
-                        "category": cat,
-                        "index": idx,
-                        "is_table": True
-                    })
-                    table_count += 1
-            elif text:
-                # 表格外段落使用 P_NNNNN 格式（5位数）
-                fulltext_items.append({
-                    "id": f"P_{paragraph_count:05d}",
-                    "text": text,
-                    "category": cat,
-                    "index": idx
-                })
-                paragraph_count += 1
-
-        fulltext_path.write_text(
-            json.dumps(fulltext_items, ensure_ascii=False, indent=2),
-            encoding='utf-8'
-        )
-
         if self.verbose:
             print(f"[Unstructured] 已生成: {section_header_md_path.name}")
             print(f"[Unstructured] 已生成: {title_with_id_md_path.name}")
-            print(f"[Unstructured] 已生成: {fulltext_path.name} ({len(fulltext_items)} 个元素, 含 {table_count} 个表格)")
 
         return section_header_md_path, title_with_id_md_path, elements, fulltext_path
 

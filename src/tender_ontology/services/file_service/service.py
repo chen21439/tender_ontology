@@ -463,10 +463,15 @@ class FileService:
             # 4. 构建 id -> fulltext_index 映射
             id_to_index = {item["id"]: i for i, item in enumerate(fulltext_items)}
 
-            # 5. 按 level 切分，递归构建树
+            # 5. 按 level 切分，递归构建树（包含段落内容）
             def build_tree_recursive(items_slice, parent_level=0):
                 """
-                递归构建树
+                递归构建树，将段落内容挂载到对应的标题下
+
+                逻辑：
+                1. 遍历 items_slice，遇到标题时创建节点
+                2. 标题和下一个同级/上级标题之间的内容作为该标题的 children
+                3. 非标题的段落直接作为叶子节点挂载
 
                 Args:
                     items_slice: fulltext 的切片（按索引范围）
@@ -483,12 +488,15 @@ class FileService:
                 current_heading_level = None
                 current_children_start = None
 
+                # 收集当前标题之前的非标题内容
+                pre_heading_items = []
+
                 for i, item in enumerate(items_slice):
                     item_id = item.get("id", "")
                     is_heading = item_id in heading_ids
                     item_level = heading_level_map.get(item_id, 999)
 
-                    # 遇到新的标题（level <= 当前标题的 level），说明当前标题的范围结束
+                    # 遇到新的标题（level <= parent_level + 1），说明需要处理
                     if is_heading and item_level <= parent_level + 1:
                         # 保存之前的标题及其子内容
                         if current_heading_idx is not None:
@@ -496,7 +504,7 @@ class FileService:
                             prev_id = prev_item.get("id", "")
                             prev_text = heading_text_map.get(prev_id, prev_item.get("text", ""))
 
-                            # 递归构建子树
+                            # 递归构建子树（包含标题之间的所有内容）
                             sub_items = items_slice[current_children_start:i]
                             sub_children = build_tree_recursive(sub_items, current_heading_level)
 
@@ -507,11 +515,24 @@ class FileService:
                                 "location": [],
                                 "children": sub_children if sub_children else None
                             })
+                        else:
+                            # 第一个标题之前的非标题内容，作为独立节点添加
+                            for pre_item in pre_heading_items:
+                                children.append({
+                                    "pid": pre_item.get("id", ""),
+                                    "title": "",
+                                    "content": pre_item.get("text", ""),
+                                    "location": []
+                                })
+                            pre_heading_items = []
 
                         # 更新当前标题
                         current_heading_idx = i
                         current_heading_level = item_level
                         current_children_start = i + 1
+                    elif current_heading_idx is None:
+                        # 还没遇到第一个标题，收集非标题内容
+                        pre_heading_items.append(item)
 
                 # 处理最后一个标题
                 if current_heading_idx is not None:
@@ -529,10 +550,19 @@ class FileService:
                         "location": [],
                         "children": sub_children if sub_children else None
                     })
+                else:
+                    # 整个 slice 没有标题，全部作为叶子节点（段落内容）
+                    for item in items_slice:
+                        children.append({
+                            "pid": item.get("id", ""),
+                            "title": "",
+                            "content": item.get("text", ""),
+                            "location": []
+                        })
 
                 # 移除空的 children
                 for child in children:
-                    if child.get("children") is None:
+                    if "children" in child and child["children"] is None:
                         del child["children"]
 
                 return children
