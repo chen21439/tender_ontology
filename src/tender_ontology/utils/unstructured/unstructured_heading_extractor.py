@@ -455,23 +455,11 @@ class UnstructuredHeadingExtractor:
                 if p is not None:
                     # 获取 XML 中的文本
                     xml_text = self._xml_loader.get_paragraph_text(p)
-                    print(f"    定位成功!")
-                    print(f"    XML 文本: {xml_text[:50]}{'...' if len(xml_text) > 50 else ''}")
-
-                    # 打印原始 XML（完整）
-                    from lxml import etree
-                    xml_str = etree.tostring(p, encoding='unicode', pretty_print=True)
-                    print(f"\n  [原始 XML]")
-                    print(xml_str)
+                    print(f"    定位成功! XML 文本: {xml_text[:50]}{'...' if len(xml_text) > 50 else ''}")
 
                     # 获取样式信息
                     style = self._xml_loader.get_paragraph_style(p)
-                    print(f"\n  [样式信息]")
-                    print(f"    style_id: {style.style_id}")
-                    print(f"    style_name: {style.style_name}")
-                    print(f"    outline_level: {style.outline_level}")
-                    print(f"    is_heading_style: {style.is_heading_style}")
-                    print(f"    num_id: {style.num_id}, ilvl: {style.ilvl}")
+                    print(f"    样式: {style.style_name or style.style_id}, outline_level={style.outline_level}")
                 else:
                     print(f"    定位失败!")
 

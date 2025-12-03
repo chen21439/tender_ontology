@@ -375,7 +375,7 @@ class DocxPdfClient:
 
         return result
 
-    def get_status(self, task_id: str) -> Dict[str, Any]:
+    def get_status(self, task_id: str, silent: bool = False) -> Dict[str, Any]:
         """
         查询任务状态
 
@@ -383,6 +383,7 @@ class DocxPdfClient:
 
         Args:
             task_id: 任务 ID
+            silent: 是否静默模式（不打印日志）
 
         Returns:
             {
@@ -395,9 +396,15 @@ class DocxPdfClient:
                 "txtPath": str
             }
         """
-        return self.http.get_json(
-            endpoint=f"/api/docx-pdf/status/{task_id}"
-        )
+        # 临时关闭日志
+        if silent:
+            old_verbose = self.http.verbose
+            self.http.verbose = False
+            try:
+                return self.http.get_json(endpoint=f"/api/docx-pdf/status/{task_id}")
+            finally:
+                self.http.verbose = old_verbose
+        return self.http.get_json(endpoint=f"/api/docx-pdf/status/{task_id}")
 
     def wait_for_completion(
         self,
@@ -410,7 +417,7 @@ class DocxPdfClient:
 
         Args:
             task_id: 任务 ID
-            poll_interval: 轮询间隔（秒），默认使用实例配置
+            poll_interval: 轮询间隔（秒），默认 5 秒
             max_poll_time: 最大等待时间（秒），默认使用实例配置
 
         Returns:
@@ -418,11 +425,12 @@ class DocxPdfClient:
         """
         import time
 
-        poll_interval = poll_interval or self.poll_interval
+        poll_interval = poll_interval or 5.0  # 默认 5 秒轮询一次
         max_poll_time = max_poll_time or self.max_poll_time
 
-        self._log(f"开始轮询任务状态: {task_id}")
+        self._log(f"等待任务完成: {task_id} (每{poll_interval}s轮询, 最长{max_poll_time}s)")
         start_time = time.time()
+        last_status = None
 
         while True:
             elapsed = time.time() - start_time
@@ -434,10 +442,13 @@ class DocxPdfClient:
                 }
 
             try:
-                status_result = self.get_status(task_id)
+                status_result = self.get_status(task_id, silent=True)  # 静默模式，不打印轮询日志
                 status = status_result.get("status", "UNKNOWN")
 
-                self._log(f"状态: {status} ({elapsed:.1f}s)")
+                # 只在状态变化时打印日志
+                if status != last_status:
+                    self._log(f"状态: {status} ({elapsed:.0f}s)")
+                    last_status = status
 
                 if status in self.FINAL_STATUSES:
                     if status == self.STATUS_COMPLETED:

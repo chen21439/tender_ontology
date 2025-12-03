@@ -13,9 +13,14 @@ from fastapi.responses import FileResponse
 from tender_ontology.routers import health, ontology, pdf_upload, knowledge_graph
 from tender_ontology.utils.db.local_storage import is_local_mode
 
-# 调试日志
+# 日志配置
 import logging
-logging.basicConfig(level=logging.DEBUG)
+
+# 关闭 urllib3 的 DEBUG 日志
+logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+# 基础日志配置
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 

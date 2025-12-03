@@ -309,15 +309,15 @@ class FileService:
             from tender_ontology.config.settings import settings
             from tender_ontology.utils.request.http_client import DocxPdfClient
 
-            # 从配置获取服务地址（如果没有配置，使用默认值）
-            base_url = getattr(settings, 'docx_pdf_service_url', 'http://localhost:8080')
+            # 从配置获取服务地址
+            base_url = settings.docx_pdf_service_url
 
             print(f"[FileService] 调用 DOCX 转 PDF 服务: {base_url}")
 
             client = DocxPdfClient(
                 base_url=base_url,
                 timeout=120.0,
-                verbose=True
+                verbose=False  # 关闭详细日志
             )
 
             # Step 1: 上传并处理
