@@ -219,6 +219,9 @@ class UnstructuredHeadingExtractor:
                 "outline_level": None,
                 "is_heading_style": False,
                 "alignment": None,  # 对齐方式: left, center, right, both
+                "ind_first_line": None,  # 首行缩进 (twips)
+                "ind_left": None,  # 左缩进 (twips)
+                "is_fake_centered": False,  # 假居中标题（大首行缩进）
                 "num_id": None,
                 "ilvl": None,
                 "xml_text": None,
@@ -250,6 +253,8 @@ class UnstructuredHeadingExtractor:
                 result["style_name"] = style.style_name
                 result["outline_level"] = style.outline_level
                 result["alignment"] = style.alignment
+                result["ind_first_line"] = style.ind_first_line
+                result["ind_left"] = style.ind_left
                 result["num_id"] = style.num_id
                 result["ilvl"] = style.ilvl
 
@@ -257,6 +262,19 @@ class UnstructuredHeadingExtractor:
                 is_heading = style.is_heading_style
                 if style.alignment == "center":
                     is_heading = True
+
+                # 假居中标题判定：大首行缩进 + 短文本 + 非居中对齐
+                # 阈值：2000 twips ≈ 3.5cm，适用于"特别警示条款"这类视觉居中的标题
+                FAKE_CENTER_THRESHOLD = 2000  # twips
+                MAX_TITLE_LENGTH = 50  # 标题最大长度
+                first_line = style.ind_first_line or 0
+                text_len = len(text)
+                if (first_line >= FAKE_CENTER_THRESHOLD
+                    and text_len <= MAX_TITLE_LENGTH
+                    and style.alignment != "center"):
+                    result["is_fake_centered"] = True
+                    is_heading = True
+
                 result["is_heading_style"] = is_heading
 
                 # 原始 XML（可选）
@@ -626,7 +644,17 @@ class UnstructuredHeadingExtractor:
                 else:
                     heading_source += " + align:center"
 
-            # 3. 二次判定结果（可能纠正或补充）
+            # 3. 假居中标题判定（大首行缩进 + 短文本）
+            if xml_info.get("is_fake_centered"):
+                if not is_heading:
+                    is_heading = True
+                    first_line = xml_info.get("ind_first_line", 0)
+                    heading_source = f"fake_center(firstLine={first_line})"
+                else:
+                    first_line = xml_info.get("ind_first_line", 0)
+                    heading_source += f" + fake_center(firstLine={first_line})"
+
+            # 4. 二次判定结果（可能纠正或补充）
             if idx in secondary_headings:
                 info = secondary_headings[idx]
                 if info.is_heading:

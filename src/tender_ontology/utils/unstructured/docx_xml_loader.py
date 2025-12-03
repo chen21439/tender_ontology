@@ -48,6 +48,9 @@ class ParagraphStyle:
     based_on: Optional[str] = None          # 基于哪个样式
     is_heading_style: bool = False          # 是否是标题样式
     alignment: Optional[str] = None         # 对齐方式: left, center, right, both(两端对齐)
+    # 缩进信息 (单位: twips, 1 inch = 1440 twips)
+    ind_first_line: Optional[int] = None    # 首行缩进 (w:ind/@w:firstLine)
+    ind_left: Optional[int] = None          # 左缩进 (w:ind/@w:left)
 
 
 class DocxXmlLoader:
@@ -328,6 +331,25 @@ class DocxXmlLoader:
         jc = pPr.find("w:jc", namespaces=OOXML_NS)
         if jc is not None:
             style.alignment = jc.get("{%s}val" % OOXML_NS["w"])
+
+        # ind (缩进): firstLine, left
+        ind = pPr.find("w:ind", namespaces=OOXML_NS)
+        if ind is not None:
+            # firstLine: 首行缩进 (twips)
+            first_line = ind.get("{%s}firstLine" % OOXML_NS["w"])
+            if first_line:
+                try:
+                    style.ind_first_line = int(first_line)
+                except (ValueError, TypeError):
+                    pass
+
+            # left: 左缩进 (twips)
+            left = ind.get("{%s}left" % OOXML_NS["w"])
+            if left:
+                try:
+                    style.ind_left = int(left)
+                except (ValueError, TypeError):
+                    pass
 
         return style
 
