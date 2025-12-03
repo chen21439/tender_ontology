@@ -455,35 +455,142 @@ class FileService:
                 })
             print(f"[FileService] 标题数: {len(model_headings)}")
 
-            # 3. 转换 fulltext_items 为 LevelTreeConstructor 需要的格式
-            # fulltext_items: [{id, text, category, index}, ...]
-            # 需要: [{id, text, label, bboxes, page}, ...]
-            converted_fulltext = []
-            heading_ids = {h["id"] for h in model_headings}
-            for item in fulltext_items:
+            # 3. 构建 id -> level 映射 和 id -> heading 映射
+            heading_level_map = {h["id"]: h["level"] for h in model_headings}
+            heading_text_map = {h["id"]: h["text"] for h in model_headings}
+            heading_ids = set(heading_level_map.keys())
+
+            # 4. 构建 id -> fulltext_index 映射
+            id_to_index = {item["id"]: i for i, item in enumerate(fulltext_items)}
+
+            # 5. 按 level 切分，递归构建树
+            def build_tree_recursive(items_slice, parent_level=0):
+                """
+                递归构建树
+
+                Args:
+                    items_slice: fulltext 的切片（按索引范围）
+                    parent_level: 父节点的 level
+
+                Returns:
+                    children 列表
+                """
+                if not items_slice:
+                    return []
+
+                children = []
+                current_heading_idx = None
+                current_heading_level = None
+                current_children_start = None
+
+                for i, item in enumerate(items_slice):
+                    item_id = item.get("id", "")
+                    is_heading = item_id in heading_ids
+                    item_level = heading_level_map.get(item_id, 999)
+
+                    # 遇到新的标题（level <= 当前标题的 level），说明当前标题的范围结束
+                    if is_heading and item_level <= parent_level + 1:
+                        # 保存之前的标题及其子内容
+                        if current_heading_idx is not None:
+                            prev_item = items_slice[current_heading_idx]
+                            prev_id = prev_item.get("id", "")
+                            prev_text = heading_text_map.get(prev_id, prev_item.get("text", ""))
+
+                            # 递归构建子树
+                            sub_items = items_slice[current_children_start:i]
+                            sub_children = build_tree_recursive(sub_items, current_heading_level)
+
+                            children.append({
+                                "pid": prev_id,
+                                "title": prev_text,
+                                "content": prev_text,
+                                "location": [],
+                                "children": sub_children if sub_children else None
+                            })
+
+                        # 更新当前标题
+                        current_heading_idx = i
+                        current_heading_level = item_level
+                        current_children_start = i + 1
+
+                # 处理最后一个标题
+                if current_heading_idx is not None:
+                    prev_item = items_slice[current_heading_idx]
+                    prev_id = prev_item.get("id", "")
+                    prev_text = heading_text_map.get(prev_id, prev_item.get("text", ""))
+
+                    sub_items = items_slice[current_children_start:]
+                    sub_children = build_tree_recursive(sub_items, current_heading_level)
+
+                    children.append({
+                        "pid": prev_id,
+                        "title": prev_text,
+                        "content": prev_text,
+                        "location": [],
+                        "children": sub_children if sub_children else None
+                    })
+
+                # 移除空的 children
+                for child in children:
+                    if child.get("children") is None:
+                        del child["children"]
+
+                return children
+
+            # 6. 找到所有一级标题的位置，按一级标题切分
+            level1_positions = []
+            for i, item in enumerate(fulltext_items):
                 item_id = item.get("id", "")
-                # 判断是否为标题
-                is_heading = item_id in heading_ids
-                converted_fulltext.append({
-                    "id": item_id,
-                    "text": item.get("text", ""),
-                    "label": "section_header" if is_heading else "text",
-                    "bboxes": [],  # 暂时用空数组
-                    "page": None
-                })
+                if item_id in heading_ids and heading_level_map.get(item_id) == 1:
+                    level1_positions.append(i)
 
-            # 4. 使用 LevelTreeConstructor 构建树
-            from tender_ontology.utils.document_struct.tree import LevelTreeConstructor
+            print(f"[FileService] 一级标题数: {len(level1_positions)}")
 
-            constructor = LevelTreeConstructor(verbose=True)
-            tree_result = constructor.build_tree(model_headings, converted_fulltext)
+            # 7. 构建根节点列表
+            structured_data = []
 
-            if not tree_result or "artifact" not in tree_result:
-                print(f"[FileService] 树构建失败")
-                return None
+            # 处理第一个一级标题之前的内容（如果有）
+            if level1_positions and level1_positions[0] > 0:
+                # 文档开头有非标题内容，创建一个虚拟根节点
+                pre_items = fulltext_items[:level1_positions[0]]
+                for item in pre_items:
+                    structured_data.append({
+                        "pid": item.get("id", ""),
+                        "title": "",
+                        "content": item.get("text", ""),
+                        "location": []
+                    })
 
-            structured_data = tree_result["artifact"]
-            print(f"[FileService] 树构建完成，根节点数: {tree_result['summary'].get('root_nodes', 0)}")
+            # 处理每个一级标题
+            for idx, pos in enumerate(level1_positions):
+                # 确定范围：当前一级标题到下一个一级标题（或文档末尾）
+                end_pos = level1_positions[idx + 1] if idx + 1 < len(level1_positions) else len(fulltext_items)
+                section_items = fulltext_items[pos:end_pos]
+
+                if not section_items:
+                    continue
+
+                # 当前一级标题
+                first_item = section_items[0]
+                first_id = first_item.get("id", "")
+                first_text = heading_text_map.get(first_id, first_item.get("text", ""))
+
+                # 递归构建子树（从第二个元素开始）
+                sub_items = section_items[1:]
+                sub_children = build_tree_recursive(sub_items, 1)
+
+                root_node = {
+                    "pid": first_id,
+                    "title": first_text,
+                    "content": first_text,
+                    "location": []
+                }
+                if sub_children:
+                    root_node["children"] = sub_children
+
+                structured_data.append(root_node)
+
+            print(f"[FileService] 树构建完成，根节点数: {len(structured_data)}")
 
             # 5. 保存 _agent.json
             agent_path = output_dir / f"{file_stem}_agent.json"

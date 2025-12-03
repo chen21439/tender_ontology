@@ -24,7 +24,7 @@ from unstructured.partition.docx import partition_docx
 
 from .docx_xml_loader import DocxXmlLoader, ParagraphLocator
 from .heading_validator import HeadingValidator, HeadingInfo
-from .heading_prompt import get_level12_prompt
+from .heading_prompt import get_level12_prompt, get_chapter_prompt
 
 
 class UnstructuredHeadingExtractor:
@@ -784,9 +784,7 @@ class UnstructuredHeadingExtractor:
 
             content_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-            # 为响应添加 type 标记
-            if content_text:
-                content_text = self._enrich_markdown_with_type(content_text)
+            # 模型已在提示词中被要求输出 type 标签，无需后处理
 
             if self.verbose:
                 print(f"[Qwen] API 调用成功")
@@ -797,34 +795,6 @@ class UnstructuredHeadingExtractor:
             if self.verbose:
                 print(f"[Qwen] API 调用失败: {e}")
             return ""
-
-    def _enrich_markdown_with_type(self, markdown_content: str) -> str:
-        """
-        为 markdown 标题添加 type 标记
-
-        规则：
-        - 册/部分/节 → type=volume
-        - 章 → type=chapter
-        """
-        volume_pattern = re.compile(r'第[一二三四五六七八九十\d]+[册部分节]')
-        chapter_pattern = re.compile(r'第[一二三四五六七八九十\d]+章')
-
-        enriched_lines = []
-        for line in markdown_content.split('\n'):
-            if line.strip().startswith('#'):
-                if volume_pattern.search(line):
-                    if '{id=' in line:
-                        line = re.sub(r'\{id=', '{type=volume, id=', line)
-                    else:
-                        line = line.rstrip() + ' {type=volume}'
-                elif chapter_pattern.search(line):
-                    if '{id=' in line:
-                        line = re.sub(r'\{id=', '{type=chapter, id=', line)
-                    else:
-                        line = line.rstrip() + ' {type=chapter}'
-            enriched_lines.append(line)
-
-        return '\n'.join(enriched_lines)
 
     def _parse_response(self, response: str) -> List[Dict[str, Any]]:
         """
@@ -884,7 +854,7 @@ class UnstructuredHeadingExtractor:
         save_response: bool = True
     ) -> List[Dict[str, Any]]:
         """
-        阶段1：提取标题层级（使用 PDF 流程的提示词）
+        阶段1：提取标题层级
 
         Args:
             sectionheader_md_path: _sectionHeader_only.md 文件路径
@@ -902,25 +872,40 @@ class UnstructuredHeadingExtractor:
         # 读取文件内容
         content = sectionheader_md_path.read_text(encoding='utf-8')
 
-        # 从 markdown 内容中提取候选标题，转换为 PDF 流程的格式
-        candidates = self._extract_candidates_from_content(content)
-
-        if self.verbose:
-            print(f"[阶段1] 提取到 {len(candidates)} 个候选标题")
-
-        if not candidates:
-            return []
-
-        # 构建 markdown 格式的标题列表（PDF 流程的输入格式）
-        # 格式：id. 标题文本
+        # 转换为 markdown 格式的标题列表
+        # 输入格式：- [category] 标题文本 {id=xxx, align=center}
+        # 输出格式：# 标题文本 {id=xxx}  （只保留 id）
         markdown_lines = []
-        for item in candidates:
-            item_id = item.get("id", "")
-            text = item.get("text", "")
-            markdown_lines.append(f"{item_id}. {text}")
+        id_pattern = re.compile(r'\{[^}]*id=([^},]+)[^}]*\}')
+        for line in content.split('\n'):
+            line = line.strip()
+            # 跳过空行、注释行、标题行
+            if not line or line.startswith('>') or line.startswith('# '):
+                continue
+            # 匹配 - [category] 格式的行
+            if line.startswith('- ['):
+                # 移除 "- [category] " 前缀
+                # 格式：- [SectionHeader] 第一章 招标公告 {id=P_00056, align=center}
+                match = re.match(r'^-\s*\[[^\]]+\]\s*(.+)$', line)
+                if match:
+                    title_with_attrs = match.group(1)
+                    # 提取 id
+                    id_match = id_pattern.search(title_with_attrs)
+                    if id_match:
+                        item_id = id_match.group(1)
+                        # 移除原始属性，只保留标题文本
+                        title_text = re.sub(r'\{[^}]+\}', '', title_with_attrs).strip()
+                        markdown_lines.append(f"# {title_text} {{id={item_id}}}")
+
         markdown_content = "\n".join(markdown_lines)
 
-        # 使用 PDF 流程的提示词
+        if self.verbose:
+            print(f"[阶段1] 转换为 {len(markdown_lines)} 行 markdown")
+
+        if not markdown_lines:
+            return []
+
+        # 构建提示词
         system_prompt, user_prompt = self._build_prompt(markdown_content)
 
         # 构建保存路径
@@ -993,51 +978,95 @@ class UnstructuredHeadingExtractor:
     def split_by_chapters(
         self,
         title_md_content: str,
-        chapter_headings: List[Dict[str, Any]]
+        chapter_headings: List[Dict[str, Any]],
+        level12_headings: List[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
         根据章节标题锚点切分 title_with_id.md 内容
 
+        如果存在 volume 结构，先按 volume 切分，再在每个 volume 内部按 chapter 切分，
+        确保 chapter 不会跨越 volume 边界。
+
         Args:
             title_md_content: title_with_id.md 的完整内容
             chapter_headings: 章节标题列表（type=chapter 的标题）
+            level12_headings: 一阶段返回的所有标题（用于获取 volume 信息）
 
         Returns:
             章节列表
         """
         lines = title_md_content.split('\n')
-
-        # 提取所有章节的 id 和位置
-        chapter_positions = []
         id_pattern = re.compile(r'\{id=([^}]+)\}')
 
+        # 构建 id -> 行号 的映射
+        id_to_line = {}
         for i, line in enumerate(lines):
             id_match = id_pattern.search(line)
             if id_match:
-                line_id = id_match.group(1)
-                for ch in chapter_headings:
-                    if ch.get("id") == line_id:
-                        chapter_positions.append({
-                            "id": line_id,
-                            "text": ch.get("text", ""),
-                            "line_index": i
-                        })
-                        break
+                id_to_line[id_match.group(1)] = i
 
-        if self.verbose:
-            print(f"[章节切分] 找到 {len(chapter_positions)} 个章节锚点")
+        # 获取 volume 列表（如果存在）
+        volume_headings = []
+        if level12_headings:
+            volume_headings = [h for h in level12_headings if h.get("type") == "volume"]
+
+        # 构建 volume 边界
+        volume_boundaries = []  # [(start_line, end_line, volume_id), ...]
+        if volume_headings:
+            for i, vol in enumerate(volume_headings):
+                vol_id = vol.get("id")
+                start_line = id_to_line.get(vol_id, 0)
+                # 下一个 volume 的起始行，或文档末尾
+                if i + 1 < len(volume_headings):
+                    next_vol_id = volume_headings[i + 1].get("id")
+                    end_line = id_to_line.get(next_vol_id, len(lines))
+                else:
+                    end_line = len(lines)
+                volume_boundaries.append((start_line, end_line, vol_id))
+
+            if self.verbose:
+                print(f"[章节切分] 存在 {len(volume_boundaries)} 个 volume 边界")
+                for start, end, vid in volume_boundaries:
+                    print(f"  - {vid}: 行 {start}-{end}")
+
+        # 构建 chapter_id -> volume 边界 的映射
+        def get_chapter_end_line(chapter_id: str, chapter_line: int) -> int:
+            """获取 chapter 的结束行（考虑 volume 边界）"""
+            # 找到该 chapter 所在的 volume 边界
+            volume_end = len(lines)
+            for vol_start, vol_end, vol_id in volume_boundaries:
+                if vol_start <= chapter_line < vol_end:
+                    volume_end = vol_end
+                    break
+
+            # 找到下一个 chapter 的起始行
+            next_chapter_line = len(lines)
+            for ch in chapter_headings:
+                ch_line = id_to_line.get(ch.get("id"), len(lines))
+                if ch_line > chapter_line:
+                    next_chapter_line = min(next_chapter_line, ch_line)
+
+            # 取 volume 边界和下一个 chapter 的较小值
+            return min(volume_end, next_chapter_line)
 
         # 切分章节内容
         chapters = []
-        for i, ch_pos in enumerate(chapter_positions):
-            start_line = ch_pos["line_index"]
-            end_line = chapter_positions[i + 1]["line_index"] if i + 1 < len(chapter_positions) else len(lines)
+        for ch in chapter_headings:
+            ch_id = ch.get("id")
+            ch_text = ch.get("text", "")
+            start_line = id_to_line.get(ch_id)
 
+            if start_line is None:
+                if self.verbose:
+                    print(f"  - 警告: 未找到章节 {ch_text[:20]}... 的位置")
+                continue
+
+            end_line = get_chapter_end_line(ch_id, start_line)
             chapter_content = '\n'.join(lines[start_line:end_line])
 
             chapters.append({
-                "id": ch_pos["id"],
-                "text": ch_pos["text"],
+                "id": ch_id,
+                "text": ch_text,
                 "content": chapter_content,
                 "start_line": start_line,
                 "end_line": end_line,
@@ -1045,7 +1074,10 @@ class UnstructuredHeadingExtractor:
             })
 
             if self.verbose:
-                print(f"  - {ch_pos['text'][:30]}... ({end_line - start_line} 行)")
+                print(f"  - {ch_text[:30]}... ({end_line - start_line} 行)")
+
+        if self.verbose:
+            print(f"[章节切分] 共切分 {len(chapters)} 个章节")
 
         return chapters
 
@@ -1053,6 +1085,7 @@ class UnstructuredHeadingExtractor:
         self,
         title_md_path: Union[str, Path],
         chapter_headings: List[Dict[str, Any]],
+        level12_headings: List[Dict[str, Any]] = None,
         max_workers: int = 8
     ) -> List[Dict[str, Any]]:
         """
@@ -1061,6 +1094,7 @@ class UnstructuredHeadingExtractor:
         Args:
             title_md_path: title_with_id.md 文件路径
             chapter_headings: 章节标题列表
+            level12_headings: 一阶段返回的所有标题（用于获取 volume 边界）
             max_workers: 最大并发数
 
         Returns:
@@ -1078,8 +1112,8 @@ class UnstructuredHeadingExtractor:
         # 读取文件
         content = title_md_path.read_text(encoding='utf-8')
 
-        # 切分章节
-        chapters = self.split_by_chapters(content, chapter_headings)
+        # 切分章节（传入 level12_headings 以处理 volume 边界）
+        chapters = self.split_by_chapters(content, chapter_headings, level12_headings)
 
         if not chapters:
             if self.verbose:
@@ -1108,27 +1142,28 @@ class UnstructuredHeadingExtractor:
             max_workers=max_workers
         )
 
-        # 构建批次（使用 PDF 流程的提示词）
+        # 构建批次（使用阶段2专用提示词）
         batches = []
+        chapter_system_prompt = get_chapter_prompt()
+
         for chapter in chapters:
-            # 从章节内容中提取候选标题
+            # 从章节内容中提取候选标题，构建 markdown 格式
             candidates = self._extract_candidates_from_content(chapter['content'])
 
-            # 构建 markdown 格式的标题列表（PDF 流程的输入格式）
+            # 构建 markdown 格式：# 标题文本 {id=xxx}
             markdown_lines = []
             for item in candidates:
                 item_id = item.get("id", "")
                 text = item.get("text", "")
-                markdown_lines.append(f"{item_id}. {text}")
+                markdown_lines.append(f"# {text} {{id={item_id}}}")
             markdown_content = "\n".join(markdown_lines)
 
-            # 使用 PDF 流程的提示词
-            system_prompt, user_prompt = self._build_prompt(markdown_content)
+            # 使用阶段2专用提示词
             context = {
                 "chapter_id": chapter.get("id"),
                 "chapter_text": chapter.get("text", "")
             }
-            batches.append((system_prompt, user_prompt, context))
+            batches.append((chapter_system_prompt, markdown_content, context))
 
         # 定义解析函数（保留原始响应）
         def parse_response_with_raw(response_text: str, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -1242,14 +1277,35 @@ class UnstructuredHeadingExtractor:
             if h.get("type") == "chapter":
                 chapter_level_map[h.get("id")] = h.get("level", 1)
 
+        # 收集所有二阶段中出现的子标题 id（用于去重）
+        stage2_sub_ids = set()
+        for chapter_result in chapter_results:
+            chapter_id = chapter_result.get("chapter_id")
+            for sub_h in chapter_result.get("headings", []):
+                sub_id = sub_h.get("id")
+                # 跳过 chapter 本身
+                if sub_id and sub_id != chapter_id:
+                    stage2_sub_ids.add(sub_id)
+
+        if self.verbose and stage2_sub_ids:
+            print(f"[聚合] 二阶段子标题 ID 数量: {len(stage2_sub_ids)}")
+
         # 聚合结果
         all_headings = []
+        added_ids = set()  # 记录已添加的 id，避免重复
 
         for h in level12_headings:
             node_id = h.get("id")
 
+            # 如果这个标题已经在二阶段子标题中出现，跳过（避免重复）
+            if node_id in stage2_sub_ids and h.get("type") != "chapter":
+                if self.verbose:
+                    print(f"[聚合] 跳过重复标题: {h.get('text', '')[:30]}... (id={node_id})")
+                continue
+
             if h.get("type") == "chapter":
                 all_headings.append(h)
+                added_ids.add(node_id)
 
                 # 找到对应的二阶段结果
                 chapter_result = next(
@@ -1263,16 +1319,20 @@ class UnstructuredHeadingExtractor:
 
                     # 添加子标题
                     for sub_h in chapter_result.get("headings", []):
-                        if sub_h.get("id") != node_id:
+                        sub_id = sub_h.get("id")
+                        if sub_id != node_id and sub_id not in added_ids:
                             adjusted_heading = sub_h.copy()
                             adjusted_heading["level"] = sub_h.get("level", 1) + level_offset
                             all_headings.append(adjusted_heading)
+                            added_ids.add(sub_id)
 
                     if self.verbose:
                         sub_count = len(chapter_result.get("headings", [])) - 1
                         print(f"[聚合] {h.get('text', '')[:20]}... -> {sub_count} 个子标题 (offset={level_offset})")
             else:
-                all_headings.append(h)
+                if node_id not in added_ids:
+                    all_headings.append(h)
+                    added_ids.add(node_id)
 
         if self.verbose:
             print(f"[聚合] 总计 {len(all_headings)} 个标题")
@@ -1360,6 +1420,7 @@ class UnstructuredHeadingExtractor:
             chapter_results = self.extract_headings_by_chapters(
                 title_with_id_md_path,
                 chapter_headings,
+                level12_headings=level12_headings,
                 max_workers=max_workers
             )
 
