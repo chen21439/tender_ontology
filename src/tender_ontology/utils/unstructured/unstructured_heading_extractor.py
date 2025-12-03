@@ -12,6 +12,10 @@ Unstructured 标题提取器
 import re
 import json
 import time
+import logging
+
+# 关闭 unstructured 的 trace 日志
+logging.getLogger("unstructured.trace").setLevel(logging.WARNING)
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
@@ -20,6 +24,7 @@ from unstructured.partition.docx import partition_docx
 
 from .docx_xml_loader import DocxXmlLoader, ParagraphLocator
 from .heading_validator import HeadingValidator, HeadingInfo
+from .heading_prompt import get_level12_prompt
 
 
 class UnstructuredHeadingExtractor:
@@ -703,63 +708,25 @@ class UnstructuredHeadingExtractor:
 
         return section_header_md_path, title_with_id_md_path, elements, fulltext_path
 
-    # ========== 阶段1：调用千问提取一二级标题 ==========
+    # ========== 阶段1：调用千问提取标题层级（使用 PDF 流程的提示词）==========
 
-    def _build_level12_prompt(self) -> str:
-        """构建一二级标题提取的提示词"""
-        prompt = """/no_think
-你是一个专业的文档结构分析引擎，专门负责识别招标文件中的一级标题和二级标题。
+    def _build_prompt(self, markdown_content: str) -> tuple:
+        """
+        构建提示词（使用本地 heading_prompt.py）
 
-## 任务说明
-从文档中找到所有的**一级标题**和**二级标题**，忽略三级及以下的标题。
+        Args:
+            markdown_content: markdown 格式的标题列表
 
-## 层级判断规则
+        Returns:
+            (system_prompt, user_prompt) 元组
+        """
+        # 使用本地提示词
+        system_prompt = get_level12_prompt()
 
-### 第一步：判断文档是否存在"册/部分/节"结构
-先扫描全文，判断是否存在"第X册"、"第X部分"或"第X节"这样的顶层结构标题。
+        # user_prompt 是标题列表
+        user_prompt = markdown_content
 
-### 第二步：根据文档结构确定层级
-
-**情况一：文档存在"册/部分/节"结构**
-- 一级标题 `#`：**"第X册"、"第X部分"、"第X节"** 格式的标题
-- 二级标题 `##`：**"第X章"** 格式的标题（挂载在册/部分/节下）
-
-**情况二：文档不存在"册/部分/节"结构**
-- 一级标题 `#`：**"第X章"** 格式的标题
-- 二级标题 `##`：章下的主要分节（如"一、""二、"等）
-
-### 补充说明
-- **独立功能标题**（如"目录"、"封面"、"特别警示条款"、"资格性审查表"、"符合性审查表"、"评标方法"、"用户需求书"等）→ 作为一级标题 `#`
-- 层级必须连续，不能跳级
-
-## 输出要求
-1. 仅在 ```markdown``` 代码块中返回找到的一级和二级标题
-2. **必须保留每个标题后的 {id=...} 标识符**，原样附在标题行末尾
-3. 只输出一级 `#` 和二级 `##` 标题，忽略更深层级
-
-## 输出示例
-
-**示例一（存在册/部分结构）：**
-```markdown
-# 第一册 专用条款 {id=P_00061}
-## 第一章 招标公告 {id=P_00100}
-## 第二章 投标须知 {id=P_00150}
-# 第二册 通用条款 {id=P_00200}
-## 第一章 总则 {id=P_00210}
-```
-
-**示例二（无册/部分结构，章为顶层）：**
-```markdown
-# 第一章 招标公告 {id=P_00010}
-## 一、项目概况 {id=P_00015}
-## 二、投标人资格要求 {id=P_00020}
-# 第二章 投标须知 {id=P_00050}
-## 一、投标文件的编制 {id=P_00055}
-```
-
-现在，请找出文档中所有的一级标题和二级标题。"""
-
-        return prompt
+        return system_prompt, user_prompt
 
     def _call_internal_qwen(
         self,
@@ -917,7 +884,7 @@ class UnstructuredHeadingExtractor:
         save_response: bool = True
     ) -> List[Dict[str, Any]]:
         """
-        阶段1：提取一二级标题
+        阶段1：提取标题层级（使用 PDF 流程的提示词）
 
         Args:
             sectionheader_md_path: _sectionHeader_only.md 文件路径
@@ -929,83 +896,99 @@ class UnstructuredHeadingExtractor:
         sectionheader_md_path = Path(sectionheader_md_path)
 
         if self.verbose:
-            print(f"\n[阶段1] 提取一二级标题...")
+            print(f"\n[阶段1] 提取标题层级...")
             print(f"[阶段1] 输入文件: {sectionheader_md_path.name}")
 
-        # 读取文件
+        # 读取文件内容
         content = sectionheader_md_path.read_text(encoding='utf-8')
 
+        # 从 markdown 内容中提取候选标题，转换为 PDF 流程的格式
+        candidates = self._extract_candidates_from_content(content)
+
+        if self.verbose:
+            print(f"[阶段1] 提取到 {len(candidates)} 个候选标题")
+
+        if not candidates:
+            return []
+
+        # 构建 markdown 格式的标题列表（PDF 流程的输入格式）
+        # 格式：id. 标题文本
+        markdown_lines = []
+        for item in candidates:
+            item_id = item.get("id", "")
+            text = item.get("text", "")
+            markdown_lines.append(f"{item_id}. {text}")
+        markdown_content = "\n".join(markdown_lines)
+
+        # 使用 PDF 流程的提示词
+        system_prompt, user_prompt = self._build_prompt(markdown_content)
+
         # 构建保存路径
+        base_name = sectionheader_md_path.stem.replace('_unstructured_sectionHeader_only', '')
         save_path = None
         if save_response:
-            base_name = sectionheader_md_path.stem.replace('_unstructured_sectionHeader_only', '')
             save_path = sectionheader_md_path.parent / f"{base_name}_unstructured_level12_response.json"
 
         # 调用 API
-        prompt = self._build_level12_prompt()
-        user_content = f"请分析以下文档内容，找出一级和二级标题：\n\n{content}"
-
-        response = self._call_internal_qwen(user_content, prompt, save_path)
+        response = self._call_internal_qwen(user_prompt, system_prompt, save_path)
 
         if not response:
             return []
 
-        # 保存 markdown 响应
+        # 保存原始响应
         if save_response:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            md_path = sectionheader_md_path.parent / f"{base_name}_unstructured_level12_response_{timestamp}.md"
-            md_path.write_text(response, encoding='utf-8')
+            raw_path = sectionheader_md_path.parent / f"{base_name}_unstructured_level12_raw_{timestamp}.txt"
+            raw_path.write_text(response, encoding='utf-8')
             if self.verbose:
-                print(f"[阶段1] Markdown 响应已保存: {md_path.name}")
+                print(f"[阶段1] 原始响应已保存: {raw_path.name}")
 
-        # 解析响应
+        # 解析 Markdown 格式的响应（PDF 流程的输出格式）
         headings = self._parse_response(response)
 
         if self.verbose:
-            print(f"[阶段1] 完成，共提取 {len(headings)} 个一二级标题")
+            print(f"[阶段1] 完成，共提取 {len(headings)} 个标题")
 
         return headings
 
     # ========== 阶段2：并发提取章节子标题 ==========
 
-    def _build_chapter_prompt(self) -> str:
-        """构建章节内标题提取的提示词"""
-        prompt = """/no_think
-你是一个专业的文档结构分析引擎，负责识别章节内的标题层级结构。
+    def _extract_candidates_from_content(self, content: str) -> List[Dict[str, Any]]:
+        """
+        从 markdown 内容中提取候选标题列表
 
-## 任务说明
-分析给定的**单个章节**内容，识别其中所有的标题并确定层级关系。
+        Args:
+            content: markdown 格式的章节内容
 
-## 关键约束（必须遵守）
-1. **整个输入内容属于同一个章节**，章节标题（第X章）是唯一的顶层标题
-2. **只能有一个 `#` 一级标题**，就是章节标题本身
-3. **章节内的所有其他标题都是该章节的后代**，必须从 `##` 开始
+        Returns:
+            候选标题列表，每个元素包含 id, text
+        """
+        candidates = []
+        id_pattern = re.compile(r'\{id=([^},]+)')
 
-## 层级判断规则
+        for line in content.split('\n'):
+            line = line.strip()
+            # 跳过空行和非标题行
+            if not line or line.startswith('>'):
+                continue
 
-根据数字序号识别候选标题：
-- 中文数字：一、二、三、（一）（二）（三）
-- 阿拉伯数字：1. 2. 3.、(1) (2) (3)、1) 2) 3)
-- 其他格式：第X节、① ② ③ 等
+            # 提取 id
+            id_match = id_pattern.search(line)
+            item_id = id_match.group(1) if id_match else ""
 
-## 输出要求
-1. 仅在 ```markdown``` 代码块中返回识别到的标题
-2. **必须保留每个标题后的 {id=...} 标识符**
-3. 层级必须连续，不能跳级
-4. **只输出一个 `#` 一级标题**
+            # 移除 markdown 标题前缀和属性
+            text = re.sub(r'^#+\s*', '', line)  # 移除 # 前缀
+            text = re.sub(r'\[[^\]]+\]\s*', '', text)  # 移除 [category]
+            text = re.sub(r'\{[^}]+\}', '', text)  # 移除 {id=...}
+            text = text.strip()
 
-## 输出示例
-```markdown
-# 第一章 招标公告 {id=P_00100}
-## 一、项目概况 {id=P_00105}
-### 1. 项目名称 {id=P_00106}
-### 2. 项目编号 {id=P_00107}
-## 二、投标人资格要求 {id=P_00120}
-```
+            if text and item_id:
+                candidates.append({
+                    "id": item_id,
+                    "text": text
+                })
 
-现在，请分析以下章节内容，识别所有标题及其层级。"""
-
-        return prompt
+        return candidates
 
     def split_by_chapters(
         self,
@@ -1125,11 +1108,22 @@ class UnstructuredHeadingExtractor:
             max_workers=max_workers
         )
 
-        # 构建批次
-        system_prompt = self._build_chapter_prompt()
+        # 构建批次（使用 PDF 流程的提示词）
         batches = []
         for chapter in chapters:
-            user_prompt = f"请分析以下章节内容，识别所有标题及其层级：\n\n{chapter['content']}"
+            # 从章节内容中提取候选标题
+            candidates = self._extract_candidates_from_content(chapter['content'])
+
+            # 构建 markdown 格式的标题列表（PDF 流程的输入格式）
+            markdown_lines = []
+            for item in candidates:
+                item_id = item.get("id", "")
+                text = item.get("text", "")
+                markdown_lines.append(f"{item_id}. {text}")
+            markdown_content = "\n".join(markdown_lines)
+
+            # 使用 PDF 流程的提示词
+            system_prompt, user_prompt = self._build_prompt(markdown_content)
             context = {
                 "chapter_id": chapter.get("id"),
                 "chapter_text": chapter.get("text", "")
