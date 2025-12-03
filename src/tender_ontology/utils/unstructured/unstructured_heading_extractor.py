@@ -551,68 +551,107 @@ class UnstructuredHeadingExtractor:
             secondary_headings = self._secondary_heading_validation(docx_path, elements)
 
         # ========== 先构建 fulltext，获取正确的 ID 映射 ==========
-        # 写入 fulltext.json (所有元素，含表格)
-        fulltext_path = docx_path.parent / f"{docx_path.stem}_unstructured_fulltext.json"
-        fulltext_items = []
+        # 建立 element index -> paragraph ID 的映射
+        idx_to_paragraph_id = {}  # idx -> "P_NNNNN" or "tNNN-..."
+        # 建立 element index -> 是否是标题候选项 的映射
+        idx_to_heading_candidate = {}  # idx -> bool
+
         table_count = 0
         paragraph_count = 0  # 表格外段落计数
 
-        # 建立 element index -> paragraph ID 的映射
-        idx_to_paragraph_id = {}  # idx -> "P_NNNNN" or "tNNN-..."
-
+        # 第一遍：分配 ID 并判断标题候选项
         for idx, el in enumerate(elements):
             cat = getattr(el, "category", None) or getattr(el, "type", None)
             text = (el.text or "").strip()
 
             # 表格使用 tNNN-rNNN-cNNN-pNNN 格式（3位数）
             if cat in ["Table", "TableChunk"]:
-                # 尝试获取 text_as_html
+                table_id = f"t{table_count:03d}-r000-c000-p000"
+                idx_to_paragraph_id[idx] = table_id
+                idx_to_heading_candidate[idx] = False
+                if text or (hasattr(el, "metadata") and hasattr(el.metadata, "text_as_html") and el.metadata.text_as_html):
+                    table_count += 1
+            elif text:
+                para_id = f"P_{paragraph_count:05d}"
+                idx_to_paragraph_id[idx] = para_id
+                paragraph_count += 1
+
+                # 判断是否是标题候选项
+                is_heading_candidate = False
+                xml_info = xml_info_map.get(idx, {})
+                alignment = xml_info.get("alignment") if xml_info else None
+
+                # 1. unstructured 原始分类
+                if cat in ["Title", "Header", "SectionHeader"]:
+                    is_heading_candidate = True
+                # 2. 居中对齐
+                if alignment == "center":
+                    is_heading_candidate = True
+                # 3. 假居中标题（大首行缩进）
+                if xml_info.get("is_fake_centered"):
+                    is_heading_candidate = True
+
+                idx_to_heading_candidate[idx] = is_heading_candidate
+
+        # 第二遍：生成 fulltext.md
+        fulltext_md_path = docx_path.parent / f"{docx_path.stem}_unstructured_fulltext.md"
+        fulltext_lines = []
+        fulltext_lines.append(f"# {docx_path.stem} - 全文内容\n")
+        fulltext_lines.append(f"> 提取时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        fulltext_lines.append("")
+
+        actual_table_count = 0
+        actual_paragraph_count = 0
+
+        for idx, el in enumerate(elements):
+            cat = getattr(el, "category", None) or getattr(el, "type", None)
+            text = (el.text or "").strip()
+
+            if cat in ["Table", "TableChunk"]:
+                # 表格
                 html_text = None
                 if hasattr(el, "metadata") and hasattr(el.metadata, "text_as_html"):
                     html_text = el.metadata.text_as_html
 
-                # 表格 ID: tNNN-r000-c000-p000（表格索引，行列段落暂为0）
-                table_id = f"t{table_count:03d}-r000-c000-p000"
-                idx_to_paragraph_id[idx] = table_id
+                table_id = idx_to_paragraph_id.get(idx, f"t{actual_table_count:03d}-r000-c000-p000")
 
                 if html_text:
-                    fulltext_items.append({
-                        "id": table_id,
-                        "text": html_text,  # 使用 HTML 格式
-                        "category": cat,
-                        "index": idx,
-                        "is_table": True
-                    })
-                    table_count += 1
+                    # 表格使用 HTML 格式，不加 # 前缀
+                    fulltext_lines.append(f"[Table] {table_id}")
+                    fulltext_lines.append(html_text)
+                    fulltext_lines.append("")
+                    actual_table_count += 1
                 elif text:
-                    # 没有 HTML，使用纯文本
-                    fulltext_items.append({
-                        "id": table_id,
-                        "text": text,
-                        "category": cat,
-                        "index": idx,
-                        "is_table": True
-                    })
-                    table_count += 1
+                    fulltext_lines.append(f"[Table] {table_id}")
+                    fulltext_lines.append(text)
+                    fulltext_lines.append("")
+                    actual_table_count += 1
             elif text:
-                # 表格外段落使用 P_NNNNN 格式（5位数）
-                para_id = f"P_{paragraph_count:05d}"
-                idx_to_paragraph_id[idx] = para_id
-                fulltext_items.append({
-                    "id": para_id,
-                    "text": text,
-                    "category": cat,
-                    "index": idx
-                })
-                paragraph_count += 1
+                para_id = idx_to_paragraph_id.get(idx, f"P_{actual_paragraph_count:05d}")
+                is_heading_candidate = idx_to_heading_candidate.get(idx, False)
+                xml_info = xml_info_map.get(idx, {})
+                alignment = xml_info.get("alignment") if xml_info else None
 
-        fulltext_path.write_text(
-            json.dumps(fulltext_items, ensure_ascii=False, indent=2),
-            encoding='utf-8'
-        )
+                # 构建属性字符串
+                attrs = f"id={para_id}"
+                if alignment == "center":
+                    attrs += ", align=center"
+                elif xml_info.get("is_fake_centered"):
+                    attrs += ", fake_center"
+
+                # 标题候选项带 # 前缀
+                if is_heading_candidate:
+                    fulltext_lines.append(f"# [{cat}] {text} {{{attrs}}}")
+                else:
+                    fulltext_lines.append(f"- [{cat}] {text} {{{attrs}}}")
+
+                actual_paragraph_count += 1
+
+        fulltext_md_path.write_text("\n".join(fulltext_lines), encoding='utf-8')
 
         if self.verbose:
-            print(f"[Unstructured] 已生成: {fulltext_path.name} ({len(fulltext_items)} 个元素, 含 {table_count} 个表格)")
+            heading_candidate_count = sum(1 for v in idx_to_heading_candidate.values() if v)
+            print(f"[Unstructured] 已生成: {fulltext_md_path.name} ({actual_paragraph_count} 个段落, {actual_table_count} 个表格, {heading_candidate_count} 个标题候选)")
 
         # ========== 提取标题类元素（使用 fulltext 中的 ID）==========
         header_types = []
@@ -733,7 +772,7 @@ class UnstructuredHeadingExtractor:
             print(f"[Unstructured] 已生成: {section_header_md_path.name}")
             print(f"[Unstructured] 已生成: {title_with_id_md_path.name}")
 
-        return section_header_md_path, title_with_id_md_path, elements, fulltext_path
+        return section_header_md_path, title_with_id_md_path, elements, fulltext_md_path
 
     # ========== 阶段1：调用千问提取标题层级（使用 PDF 流程的提示词）==========
 
@@ -965,65 +1004,105 @@ class UnstructuredHeadingExtractor:
 
     # ========== 阶段2：并发提取章节子标题 ==========
 
+    def _truncate_text(self, text: str, max_length: int = 20) -> str:
+        """
+        缩略文本：小于 max_length 个字完整发送，否则缩略为 前5字...省略N字...后5字
+
+        Args:
+            text: 原始文本
+            max_length: 最大长度阈值（默认20）
+
+        Returns:
+            缩略后的文本
+        """
+        if len(text) < max_length:
+            return text
+        # 前5个字 + ...省略N字... + 后5个字
+        omitted = len(text) - 10
+        return f"{text[:5]}...省略{omitted}字...{text[-5:]}"
+
     def _extract_candidates_from_content(self, content: str) -> List[Dict[str, Any]]:
         """
-        从 markdown 内容中提取候选标题列表
+        从 markdown 内容中提取章节内容（标题完整发送，正文缩略）
 
         Args:
             content: markdown 格式的章节内容
 
         Returns:
-            候选标题列表，每个元素包含 id, text
+            候选内容列表，每个元素包含 id, text, is_heading
         """
         candidates = []
         id_pattern = re.compile(r'\{id=([^},]+)')
 
         for line in content.split('\n'):
             line = line.strip()
-            # 跳过空行和非标题行
-            if not line or line.startswith('>'):
+            if not line:
+                continue
+            # 跳过文件头部的标题（如 "# 文件名 - 全文内容"）
+            if line.startswith('# ') and ' - 全文内容' in line:
+                continue
+            # 跳过注释行
+            if line.startswith('>'):
+                continue
+            # 跳过表格
+            if line.startswith('[Table]'):
                 continue
 
             # 提取 id
             id_match = id_pattern.search(line)
             item_id = id_match.group(1) if id_match else ""
 
-            # 移除 markdown 标题前缀和属性
-            text = re.sub(r'^#+\s*', '', line)  # 移除 # 前缀
+            # 判断是标题还是普通段落
+            is_heading = line.startswith('#')
+
+            # 移除 markdown 前缀和属性
+            if is_heading:
+                text = re.sub(r'^#+\s*', '', line)  # 移除 # 前缀
+            else:
+                text = re.sub(r'^-\s*', '', line)  # 移除 - 前缀
+
             text = re.sub(r'\[[^\]]+\]\s*', '', text)  # 移除 [category]
             text = re.sub(r'\{[^}]+\}', '', text)  # 移除 {id=...}
             text = text.strip()
 
             if text and item_id:
+                # 标题完整发送，正文缩略
+                if is_heading:
+                    display_text = text
+                else:
+                    display_text = self._truncate_text(text)
+
                 candidates.append({
                     "id": item_id,
-                    "text": text
+                    "text": text,  # 原始文本（用于后续处理）
+                    "display_text": display_text,  # 显示文本（用于发送给模型）
+                    "is_heading": is_heading
                 })
 
         return candidates
 
     def split_by_chapters(
         self,
-        title_md_content: str,
+        fulltext_md_content: str,
         chapter_headings: List[Dict[str, Any]],
         level12_headings: List[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
-        根据章节标题锚点切分 title_with_id.md 内容
+        根据章节标题锚点切分 fulltext.md 内容
 
         如果存在 volume 结构，先按 volume 切分，再在每个 volume 内部按 chapter 切分，
         确保 chapter 不会跨越 volume 边界。
 
         Args:
-            title_md_content: title_with_id.md 的完整内容
+            fulltext_md_content: fulltext.md 的完整内容
             chapter_headings: 章节标题列表（type=chapter 的标题）
             level12_headings: 一阶段返回的所有标题（用于获取 volume 信息）
 
         Returns:
             章节列表
         """
-        lines = title_md_content.split('\n')
-        id_pattern = re.compile(r'\{id=([^}]+)\}')
+        lines = fulltext_md_content.split('\n')
+        id_pattern = re.compile(r'\{id=([^},]+)')
 
         # 构建 id -> 行号 的映射
         id_to_line = {}
@@ -1110,7 +1189,7 @@ class UnstructuredHeadingExtractor:
 
     def extract_headings_by_chapters(
         self,
-        title_md_path: Union[str, Path],
+        fulltext_md_path: Union[str, Path],
         chapter_headings: List[Dict[str, Any]],
         level12_headings: List[Dict[str, Any]] = None,
         max_workers: int = 8
@@ -1119,7 +1198,7 @@ class UnstructuredHeadingExtractor:
         阶段2：并发提取各章节的子标题
 
         Args:
-            title_md_path: title_with_id.md 文件路径
+            fulltext_md_path: fulltext.md 文件路径
             chapter_headings: 章节标题列表
             level12_headings: 一阶段返回的所有标题（用于获取 volume 边界）
             max_workers: 最大并发数
@@ -1130,14 +1209,14 @@ class UnstructuredHeadingExtractor:
         from tender_ontology.utils.request.ai_client import AIClient
         from tender_ontology.utils.request.batch_processor import BatchProcessor
 
-        title_md_path = Path(title_md_path)
+        fulltext_md_path = Path(fulltext_md_path)
 
         if self.verbose:
             print(f"\n[阶段2] 并发提取章节子标题...")
-            print(f"[阶段2] 输入文件: {title_md_path.name}")
+            print(f"[阶段2] 输入文件: {fulltext_md_path.name}")
 
         # 读取文件
-        content = title_md_path.read_text(encoding='utf-8')
+        content = fulltext_md_path.read_text(encoding='utf-8')
 
         # 切分章节（传入 level12_headings 以处理 volume 边界）
         chapters = self.split_by_chapters(content, chapter_headings, level12_headings)
@@ -1173,24 +1252,55 @@ class UnstructuredHeadingExtractor:
         batches = []
         chapter_system_prompt = get_chapter_prompt()
 
+        # 统计信息
+        chapter_stats = []  # 每个章节的统计信息
+
         for chapter in chapters:
             # 从章节内容中提取候选标题，构建 markdown 格式
             candidates = self._extract_candidates_from_content(chapter['content'])
 
-            # 构建 markdown 格式：# 标题文本 {id=xxx}
+            # 构建 markdown 格式：
+            # - 标题候选项：# 标题文本 {id=xxx}
+            # - 普通段落：- 缩略文本 {id=xxx}
             markdown_lines = []
+            heading_count = 0
+            paragraph_count = 0
             for item in candidates:
                 item_id = item.get("id", "")
-                text = item.get("text", "")
-                markdown_lines.append(f"# {text} {{id={item_id}}}")
+                display_text = item.get("display_text", item.get("text", ""))
+                is_heading = item.get("is_heading", False)
+
+                if is_heading:
+                    markdown_lines.append(f"# {display_text} {{id={item_id}}}")
+                    heading_count += 1
+                else:
+                    markdown_lines.append(f"- {display_text} {{id={item_id}}}")
+                    paragraph_count += 1
             markdown_content = "\n".join(markdown_lines)
+
+            # 估算 token 数（中文约 1.5 字符/token，英文约 4 字符/token，这里简单按 2 字符/token 估算）
+            content_chars = len(markdown_content)
+            estimated_tokens = content_chars // 2
 
             # 使用阶段2专用提示词
             context = {
                 "chapter_id": chapter.get("id"),
-                "chapter_text": chapter.get("text", "")
+                "chapter_text": chapter.get("text", ""),
+                "heading_count": heading_count,
+                "paragraph_count": paragraph_count,
+                "content_chars": content_chars,
+                "estimated_tokens": estimated_tokens
             }
             batches.append((chapter_system_prompt, markdown_content, context))
+
+            # 记录统计信息
+            chapter_stats.append({
+                "chapter_text": chapter.get("text", "")[:30],
+                "heading_count": heading_count,
+                "paragraph_count": paragraph_count,
+                "content_chars": content_chars,
+                "estimated_tokens": estimated_tokens
+            })
 
         # 定义解析函数（保留原始响应）
         def parse_response_with_raw(response_text: str, context: Dict[str, Any]) -> Dict[str, Any]:
@@ -1216,11 +1326,38 @@ class UnstructuredHeadingExtractor:
             return []
 
         # 保存二阶段结果到 _unstructured_model.md
-        self._save_stage2_model_md(title_md_path, results)
+        self._save_stage2_model_md(fulltext_md_path, results)
 
         if self.verbose:
             total_headings = sum(len(r.get("headings", [])) for r in results)
-            print(f"[阶段2] 完成，共处理 {len(results)} 个章节，提取 {total_headings} 个标题")
+            print(f"\n[阶段2] 完成，共处理 {len(results)} 个章节，提取 {total_headings} 个标题")
+
+            # 打印汇总统计
+            print(f"\n{'=' * 80}")
+            print(f"[阶段2 Token 统计汇总]")
+            print(f"{'=' * 80}")
+            print(f"{'章节':<35} {'标题数':>6} {'段落数':>6} {'字符数':>8} {'预估Token':>10}")
+            print(f"{'-' * 80}")
+
+            total_heading_count = 0
+            total_paragraph_count = 0
+            total_chars = 0
+            total_tokens = 0
+
+            for stat in chapter_stats:
+                chapter_text = stat['chapter_text']
+                if len(chapter_text) > 32:
+                    chapter_text = chapter_text[:29] + "..."
+                print(f"{chapter_text:<35} {stat['heading_count']:>6} {stat['paragraph_count']:>6} {stat['content_chars']:>8} {stat['estimated_tokens']:>10}")
+
+                total_heading_count += stat['heading_count']
+                total_paragraph_count += stat['paragraph_count']
+                total_chars += stat['content_chars']
+                total_tokens += stat['estimated_tokens']
+
+            print(f"{'-' * 80}")
+            print(f"{'合计':<35} {total_heading_count:>6} {total_paragraph_count:>6} {total_chars:>8} {total_tokens:>10}")
+            print(f"{'=' * 80}")
 
         return results
 
@@ -1445,7 +1582,7 @@ class UnstructuredHeadingExtractor:
         chapter_results = []
         if chapter_headings:
             chapter_results = self.extract_headings_by_chapters(
-                title_with_id_md_path,
+                paragraph_fulltext_path,  # 使用 fulltext.md 进行章节切分
                 chapter_headings,
                 level12_headings=level12_headings,
                 max_workers=max_workers
