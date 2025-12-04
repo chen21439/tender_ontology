@@ -5,6 +5,7 @@
 from typing import List, Dict, Any, Callable, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+from loguru import logger
 
 
 class BatchProcessor:
@@ -44,11 +45,18 @@ class BatchProcessor:
         else:
             self.batch_manager = batch_manager
 
-    def _print_thread_safe(self, message: str):
-        """线程安全的打印"""
+    def _log_thread_safe(self, message: str, level: str = "info"):
+        """线程安全的日志记录"""
         if self.verbose:
             with self._print_lock:
-                print(message)
+                if level == "info":
+                    logger.info(message)
+                elif level == "error":
+                    logger.error(message)
+                elif level == "warning":
+                    logger.warning(message)
+                elif level == "debug":
+                    logger.debug(message)
 
     def _process_single_batch(
         self,
@@ -67,7 +75,7 @@ class BatchProcessor:
             (batch_idx, result_dict) 或 (batch_idx, None) 如果失败
         """
         try:
-            self._print_thread_safe(f"\n[Batch {batch_idx}/{total_batches}] 开始发送请求")
+            self._log_thread_safe(f"[Batch {batch_idx}/{total_batches}] 开始发送请求")
 
             # 发送请求
             response_text = self.ai_client.send_request(
@@ -80,12 +88,12 @@ class BatchProcessor:
             # 解析结果
             batch_result = parse_response_func(response_text, context)
 
-            self._print_thread_safe(f"[Batch {batch_idx}/{total_batches}] 处理成功")
+            self._log_thread_safe(f"[Batch {batch_idx}/{total_batches}] 处理成功")
 
             return (batch_idx, batch_result)
 
         except Exception as e:
-            self._print_thread_safe(f"[Batch {batch_idx}/{total_batches}] 处理失败: {e}")
+            self._log_thread_safe(f"[Batch {batch_idx}/{total_batches}] 处理失败: {e}", level="error")
             return (batch_idx, None)
 
     def process_batches(
@@ -116,9 +124,9 @@ class BatchProcessor:
 
         if self.verbose:
             mode = "并行" if parallel else "串行"
-            print(f"\n[BatchProcessor] 开始{mode}处理 {total_batches} 个批次")
+            logger.info(f"[BatchProcessor] 开始{mode}处理 {total_batches} 个批次")
             if parallel:
-                print(f"[BatchProcessor] 最大并发数: {self.max_workers}")
+                logger.info(f"[BatchProcessor] 最大并发数: {self.max_workers}")
 
         if not parallel:
             # 串行处理（原逻辑）
@@ -160,18 +168,16 @@ class BatchProcessor:
             raise Exception("所有批次都处理失败")
 
         if self.verbose:
-            print(f"\n[BatchProcessor] 成功处理 {success_count}/{total_batches} 个批次")
+            logger.info(f"[BatchProcessor] 成功处理 {success_count}/{total_batches} 个批次")
 
-        # 合并结果（第 104 行：结果汇总入口）
+        # 合并结果
         if self.verbose:
-            print(f"\n{'=' * 80}")
-            print(f"[BatchProcessor] 合并 {len(all_results)} 个批次的结果")
-            print(f"{'=' * 80}")
+            logger.info(f"[BatchProcessor] 合并 {len(all_results)} 个批次的结果")
 
         final_result = merge_results_func(all_results)
 
         if self.verbose:
-            print(f"\n[BatchProcessor] 处理完成")
+            logger.info(f"[BatchProcessor] 处理完成")
 
         return final_result
 
@@ -187,9 +193,7 @@ class BatchProcessor:
 
         for batch_idx, (system_prompt, user_prompt, context) in enumerate(batches, 1):
             if self.verbose:
-                print(f"\n{'=' * 80}")
-                print(f"[Batch {batch_idx}/{len(batches)}] 发送请求")
-                print(f"{'=' * 80}")
+                logger.info(f"[Batch {batch_idx}/{len(batches)}] 发送请求")
 
             try:
                 # 发送请求
@@ -205,10 +209,10 @@ class BatchProcessor:
                 all_results.append(batch_result)
 
                 if self.verbose:
-                    print(f"[Batch {batch_idx}/{len(batches)}] 处理成功")
+                    logger.info(f"[Batch {batch_idx}/{len(batches)}] 处理成功")
 
             except Exception as e:
-                print(f"\n[Batch {batch_idx}/{len(batches)}] 处理失败: {e}")
+                logger.error(f"[Batch {batch_idx}/{len(batches)}] 处理失败: {e}")
                 # 继续处理下一个批次
                 continue
 
@@ -217,14 +221,12 @@ class BatchProcessor:
 
         # 合并结果
         if self.verbose:
-            print(f"\n{'=' * 80}")
-            print(f"[BatchProcessor] 合并 {len(all_results)} 个批次的结果")
-            print(f"{'=' * 80}")
+            logger.info(f"[BatchProcessor] 合并 {len(all_results)} 个批次的结果")
 
         final_result = merge_results_func(all_results)
 
         if self.verbose:
-            print(f"\n[BatchProcessor] 处理完成")
+            logger.info(f"[BatchProcessor] 处理完成")
 
         return final_result
 
@@ -257,7 +259,7 @@ def merge_candidates_with_dedup(
         all_candidates.extend(candidates)
 
     if verbose:
-        print(f"[merge_candidates_with_dedup] 收集到 {len(all_candidates)} 个候选")
+        logger.info(f"[merge_candidates_with_dedup] 收集到 {len(all_candidates)} 个候选")
 
     # 去重（基于 ID）
     seen_ids = set()
@@ -269,10 +271,10 @@ def merge_candidates_with_dedup(
             seen_ids.add(item_id)
             unique_candidates.append(candidate)
         elif verbose:
-            print(f"[去重] 跳过重复的 {id_key}: {item_id}")
+            logger.debug(f"[去重] 跳过重复的 {id_key}: {item_id}")
 
     if verbose:
-        print(f"[merge_candidates_with_dedup] 去重后: {len(unique_candidates)} 个候选")
+        logger.info(f"[merge_candidates_with_dedup] 去重后: {len(unique_candidates)} 个候选")
 
     # 按分数降序排序
     unique_candidates.sort(key=lambda x: x.get(score_key, 0), reverse=True)

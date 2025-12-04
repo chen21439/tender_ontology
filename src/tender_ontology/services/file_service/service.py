@@ -434,13 +434,14 @@ class FileService:
         try:
             print(f"[FileService] 开始构建文档树...")
 
-            # 1. 读取 fulltext.json（所有元素，含表格）
-            fulltext_path = output_dir / f"{file_stem}_unstructured_fulltext.json"
+            # 1. 读取 fulltext.md（所有元素，含表格）
+            fulltext_path = output_dir / f"{file_stem}_unstructured_fulltext.md"
             if not fulltext_path.exists():
                 print(f"[FileService] 警告: {fulltext_path.name} 不存在，跳过树构建")
                 return None
 
-            fulltext_items = json.loads(fulltext_path.read_text(encoding='utf-8'))
+            # 解析 fulltext.md 为 items 列表
+            fulltext_items = self._parse_fulltext_md(fulltext_path)
             print(f"[FileService] 读取 fulltext: {len(fulltext_items)} 个元素")
 
             # 2. 转换 all_headings 为 model_headings 格式
@@ -683,6 +684,109 @@ class FileService:
             import traceback
             traceback.print_exc()
             return None
+
+    def _parse_fulltext_md(self, fulltext_path: Path) -> list:
+        """
+        解析 fulltext.md 文件为 items 列表
+
+        fulltext.md 格式:
+        - # [category] 标题文本 {id=P_00001, ...}  -> 标题候选项
+        - - [category] 段落文本 {id=P_00002, ...}  -> 普通段落
+        - [Table] t001-r000-c000-p000             -> 表格
+          <table>...</table>
+
+        Args:
+            fulltext_path: fulltext.md 文件路径
+
+        Returns:
+            items 列表，每个元素: {"id": "P_00001", "text": "...", "category": "..."}
+        """
+        import re
+
+        content = fulltext_path.read_text(encoding='utf-8')
+        lines = content.split('\n')
+
+        items = []
+        id_pattern = re.compile(r'\{id=([^},]+)')
+        category_pattern = re.compile(r'\[([^\]]+)\]')
+
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # 跳过空行
+            if not line:
+                i += 1
+                continue
+
+            # 跳过文件头部的标题（如 "# 文件名 - 全文内容"）
+            if line.startswith('# ') and ' - 全文内容' in line:
+                i += 1
+                continue
+
+            # 跳过注释行
+            if line.startswith('>'):
+                i += 1
+                continue
+
+            # 处理表格
+            if line.startswith('[Table]'):
+                # 提取表格 ID
+                parts = line.split(' ', 1)
+                table_id = parts[1].strip() if len(parts) > 1 else ""
+
+                # 收集表格内容（直到下一个非表格行）
+                table_content = []
+                i += 1
+                while i < len(lines):
+                    next_line = lines[i]
+                    # 如果遇到新的标记行，结束表格
+                    if next_line.strip().startswith('#') or next_line.strip().startswith('-') or next_line.strip().startswith('[Table]'):
+                        break
+                    if next_line.strip():
+                        table_content.append(next_line)
+                    i += 1
+
+                items.append({
+                    "id": table_id,
+                    "text": '\n'.join(table_content),
+                    "category": "Table"
+                })
+                continue
+
+            # 处理标题候选项 (# 开头) 和普通段落 (- 开头)
+            if line.startswith('#') or line.startswith('-'):
+                # 提取 id
+                id_match = id_pattern.search(line)
+                item_id = id_match.group(1) if id_match else ""
+
+                # 提取 category
+                cat_match = category_pattern.search(line)
+                category = cat_match.group(1) if cat_match else ""
+
+                # 提取文本
+                # 移除 # 或 - 前缀
+                if line.startswith('#'):
+                    text = re.sub(r'^#+\s*', '', line)
+                else:
+                    text = re.sub(r'^-\s*', '', line)
+
+                # 移除 [category]
+                text = re.sub(r'\[[^\]]+\]\s*', '', text)
+                # 移除 {id=..., ...}
+                text = re.sub(r'\{[^}]+\}', '', text)
+                text = text.strip()
+
+                if item_id:  # 只添加有 id 的条目
+                    items.append({
+                        "id": item_id,
+                        "text": text,
+                        "category": category
+                    })
+
+            i += 1
+
+        return items
 
     def _update_task_status(
         self,

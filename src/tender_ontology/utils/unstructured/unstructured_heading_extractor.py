@@ -1066,18 +1066,23 @@ class UnstructuredHeadingExtractor:
             text = text.strip()
 
             if text and item_id:
-                # 标题完整发送，正文缩略
+                # 标题完整发送，正文大于20字符直接跳过
                 if is_heading:
-                    display_text = text
-                else:
-                    display_text = self._truncate_text(text)
-
-                candidates.append({
-                    "id": item_id,
-                    "text": text,  # 原始文本（用于后续处理）
-                    "display_text": display_text,  # 显示文本（用于发送给模型）
-                    "is_heading": is_heading
-                })
+                    candidates.append({
+                        "id": item_id,
+                        "text": text,
+                        "display_text": text,
+                        "is_heading": True
+                    })
+                elif len(text) < 20:
+                    # 只保留短段落（可能是遗漏的标题）
+                    candidates.append({
+                        "id": item_id,
+                        "text": text,
+                        "display_text": text,
+                        "is_heading": False
+                    })
+                # 长段落直接跳过，不发送给模型
 
         return candidates
 
