@@ -221,13 +221,25 @@ class FileService:
                 result = unstructured_future.result()
 
             # 处理 PDF 结果
+            id_to_location = {}
             if pdf_result:
                 artifacts["docx_pdf"] = pdf_result
                 artifacts["pdf_path"] = pdf_result.get("pdf_path", "")
                 print(f"[FileService] DOCX 转 PDF 完成: {pdf_result.get('pdf_path', '')}")
 
+                # 解析位置信息
+                id_to_location = self._parse_location_files(output_dir)
+                print(f"[FileService] 解析位置信息: {len(id_to_location)} 个元素")
+
             # 处理 Unstructured 结果
             print(f"[FileService] Unstructured 提取完成")
+
+            # 回填位置信息到 fulltext.md
+            if id_to_location:
+                fulltext_md_path = output_dir / f"{file_path.stem}_unstructured_fulltext.md"
+                if fulltext_md_path.exists():
+                    self._backfill_location_to_fulltext(fulltext_md_path, id_to_location)
+                    print(f"[FileService] 位置信息已回填到 fulltext.md")
 
             # 构建返回结果
             artifacts.update({
@@ -430,6 +442,8 @@ class FileService:
         import json
         import time
         import requests
+        import re
+        import glob
 
         try:
             print(f"[FileService] 开始构建文档树...")
@@ -443,6 +457,10 @@ class FileService:
             # 解析 fulltext.md 为 items 列表
             fulltext_items = self._parse_fulltext_md(fulltext_path)
             print(f"[FileService] 读取 fulltext: {len(fulltext_items)} 个元素")
+
+            # 1.5 解析 paragraph.txt 和 table.txt 获取 id -> page/bbox 映射
+            id_to_location = self._parse_location_files(output_dir)
+            print(f"[FileService] 读取位置信息: {len(id_to_location)} 个元素")
 
             # 2. 转换 all_headings 为 model_headings 格式
             # all_headings: [{id, text, level, type?}, ...]
@@ -513,17 +531,18 @@ class FileService:
                                 "pid": prev_id,
                                 "title": prev_text,
                                 "content": prev_text,
-                                "location": [],
+                                "location": self._get_location_for_id(prev_id, id_to_location),
                                 "children": sub_children if sub_children else None
                             })
                         else:
                             # 第一个标题之前的非标题内容，作为独立节点添加
                             for pre_item in pre_heading_items:
+                                pre_id = pre_item.get("id", "")
                                 children.append({
-                                    "pid": pre_item.get("id", ""),
+                                    "pid": pre_id,
                                     "title": "",
                                     "content": pre_item.get("text", ""),
-                                    "location": []
+                                    "location": self._get_location_for_id(pre_id, id_to_location)
                                 })
                             pre_heading_items = []
 
@@ -548,17 +567,18 @@ class FileService:
                         "pid": prev_id,
                         "title": prev_text,
                         "content": prev_text,
-                        "location": [],
+                        "location": self._get_location_for_id(prev_id, id_to_location),
                         "children": sub_children if sub_children else None
                     })
                 else:
                     # 整个 slice 没有标题，全部作为叶子节点（段落内容）
                     for item in items_slice:
+                        item_id = item.get("id", "")
                         children.append({
-                            "pid": item.get("id", ""),
+                            "pid": item_id,
                             "title": "",
                             "content": item.get("text", ""),
-                            "location": []
+                            "location": self._get_location_for_id(item_id, id_to_location)
                         })
 
                 # 移除空的 children
@@ -585,11 +605,12 @@ class FileService:
                 # 文档开头有非标题内容，创建一个虚拟根节点
                 pre_items = fulltext_items[:level1_positions[0]]
                 for item in pre_items:
+                    item_id = item.get("id", "")
                     structured_data.append({
-                        "pid": item.get("id", ""),
+                        "pid": item_id,
                         "title": "",
                         "content": item.get("text", ""),
-                        "location": []
+                        "location": self._get_location_for_id(item_id, id_to_location)
                     })
 
             # 处理每个一级标题
@@ -614,7 +635,7 @@ class FileService:
                     "pid": first_id,
                     "title": first_text,
                     "content": first_text,
-                    "location": []
+                    "location": self._get_location_for_id(first_id, id_to_location)
                 }
                 if sub_children:
                     root_node["children"] = sub_children
@@ -684,6 +705,180 @@ class FileService:
             import traceback
             traceback.print_exc()
             return None
+
+    def _backfill_location_to_fulltext(
+        self,
+        fulltext_path: Path,
+        id_to_location: Dict[str, Dict[str, Any]]
+    ):
+        """
+        将位置信息回填到 fulltext.md 文件中
+
+        原格式: # [Title] 文本 {id=P_00001}
+        回填后: # [Title] 文本 {id=P_00001, page=1, bbox=90.9,200.5,514.4,210.5}
+
+        Args:
+            fulltext_path: fulltext.md 文件路径
+            id_to_location: id -> page/bbox 映射
+        """
+        import re
+
+        content = fulltext_path.read_text(encoding='utf-8')
+        lines = content.split('\n')
+        updated_lines = []
+
+        # 匹配 {id=xxx} 或 {id=xxx, ...}
+        id_pattern = re.compile(r'\{id=([^},]+)([^}]*)\}')
+
+        for line in lines:
+            # 查找 {id=xxx} 模式
+            match = id_pattern.search(line)
+            if match:
+                item_id = match.group(1)
+                existing_attrs = match.group(2)  # 可能有其他属性
+
+                # 获取位置信息
+                loc_info = self._get_raw_location_for_id(item_id, id_to_location)
+
+                if loc_info:
+                    page = loc_info.get("page", "")
+                    bbox = loc_info.get("bbox", "")
+
+                    # 构建新的属性字符串
+                    new_attrs = f"id={item_id}, page={page}, bbox={bbox}"
+                    new_tag = "{" + new_attrs + "}"
+
+                    # 替换原来的 {id=xxx...}
+                    line = id_pattern.sub(new_tag, line)
+
+            updated_lines.append(line)
+
+        # 写回文件
+        fulltext_path.write_text('\n'.join(updated_lines), encoding='utf-8')
+
+    def _get_raw_location_for_id(
+        self,
+        item_id: str,
+        id_to_location: Dict[str, Dict[str, Any]]
+    ) -> Optional[Dict[str, str]]:
+        """
+        根据 id 获取原始位置信息（不转换格式）
+
+        Args:
+            item_id: 元素 ID (如 P_00001, t001)
+            id_to_location: id -> page/bbox 映射
+
+        Returns:
+            {"page": "1", "bbox": "x1,y1,x2,y2"} 或 None
+        """
+        # 尝试直接匹配
+        loc_info = id_to_location.get(item_id)
+
+        # 如果是 P_00001 格式，尝试转换为 p001 格式
+        if not loc_info and item_id.startswith("P_"):
+            try:
+                num = int(item_id.replace("P_", ""))
+                alt_id = f"p{num:03d}"
+                loc_info = id_to_location.get(alt_id)
+            except ValueError:
+                pass
+
+        return loc_info
+
+    def _parse_location_files(self, output_dir: Path) -> Dict[str, Dict[str, Any]]:
+        """
+        解析 paragraph.txt 和 table.txt 获取 id -> page/bbox 映射
+
+        文件格式:
+        - paragraph.txt: <p id="p001" type="P" mcid="4" page="1" bbox="x1,y1,x2,y2">文本</p>
+        - table.txt: <table id="t001" type="Table" page="1" bbox="x1,y1,x2,y2">...</table>
+
+        Args:
+            output_dir: 输出目录
+
+        Returns:
+            {id: {"page": "1", "bbox": "x1,y1,x2,y2"}, ...}
+        """
+        import re
+
+        id_to_location = {}
+
+        # 匹配段落: <p id="p001" ... page="1" bbox="...">
+        p_pattern = re.compile(r'<p\s+id="([^"]+)"[^>]*page="([^"]+)"[^>]*bbox="([^"]+)"')
+        # 匹配表格: <table id="t001" ... page="1" bbox="...">
+        table_pattern = re.compile(r'<table\s+id="([^"]+)"[^>]*page="([^"]+)"[^>]*bbox="([^"]+)"')
+
+        # 解析 paragraph.txt
+        paragraph_files = list(output_dir.glob("*_paragraph.txt"))
+        for pf in paragraph_files:
+            try:
+                content = pf.read_text(encoding='utf-8')
+                for match in p_pattern.finditer(content):
+                    pid, page, bbox = match.groups()
+                    id_to_location[pid] = {"page": page, "bbox": bbox}
+            except Exception as e:
+                print(f"[FileService] 解析 paragraph.txt 失败: {e}")
+
+        # 解析 table.txt (只取表格级别的 id，如 t001)
+        table_files = list(output_dir.glob("*_table.txt"))
+        for tf in table_files:
+            try:
+                content = tf.read_text(encoding='utf-8')
+                for match in table_pattern.finditer(content):
+                    tid, page, bbox = match.groups()
+                    id_to_location[tid] = {"page": page, "bbox": bbox}
+            except Exception as e:
+                print(f"[FileService] 解析 table.txt 失败: {e}")
+
+        return id_to_location
+
+    def _get_location_for_id(self, item_id: str, id_to_location: Dict[str, Dict[str, Any]]) -> list:
+        """
+        根据 id 获取 location 列表
+
+        Args:
+            item_id: 元素 ID (如 P_00001, t001)
+            id_to_location: id -> page/bbox 映射
+
+        Returns:
+            location 列表: [{"page": 1, "bbox": [x1,y1,x2,y2]}, ...]
+        """
+        # 尝试直接匹配
+        loc_info = id_to_location.get(item_id)
+
+        # 如果是 P_00001 格式，尝试转换为 p001 格式
+        if not loc_info and item_id.startswith("P_"):
+            # P_00001 -> p1
+            try:
+                num = int(item_id.replace("P_", ""))
+                alt_id = f"p{num:03d}"
+                loc_info = id_to_location.get(alt_id)
+            except ValueError:
+                pass
+
+        if not loc_info:
+            return []
+
+        page_str = loc_info.get("page", "")
+        bbox_str = loc_info.get("bbox", "")
+
+        # 处理跨页情况: page="1|2" bbox="x1,y1,x2,y2|x3,y3,x4,y4"
+        pages = page_str.split("|")
+        bboxes = bbox_str.split("|")
+
+        locations = []
+        for i, page in enumerate(pages):
+            try:
+                page_num = int(page)
+                bbox_coords = [float(x) for x in bboxes[i].split(",")] if i < len(bboxes) else []
+                locations.append({
+                    "page": page_num,
+                    "bbox": bbox_coords
+                })
+            except (ValueError, IndexError):
+                continue
+
+        return locations
 
     def _parse_fulltext_md(self, fulltext_path: Path) -> list:
         """
