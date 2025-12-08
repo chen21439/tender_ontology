@@ -517,20 +517,20 @@ def get_folder_graph_data(folder_ids: List[int]) -> Dict[str, List[Dict[str, Any
     if not doc_dir.exists():
         return {"nodes": [], "edges": []}
 
-    # 1. 先加载公共节点 neo4j.json
-    neo4j_file = doc_dir / "neo4j.json"
-    if neo4j_file.exists():
+    # 1. 先加载公共节点 标签节点.json
+    label_file = doc_dir / "标签节点.json"
+    if label_file.exists():
         try:
-            with open(neo4j_file, "r", encoding="utf-8") as f:
-                neo4j_data = json.load(f)
-                for node in neo4j_data.get("nodes", []):
+            with open(label_file, "r", encoding="utf-8") as f:
+                label_data = json.load(f)
+                for node in label_data.get("nodes", []):
                     node_id = node.get("id")
                     if node_id and node_id not in node_ids_seen:
                         all_nodes.append(node)
                         node_ids_seen.add(node_id)
-                all_edges.extend(neo4j_data.get("edges", []))
+                all_edges.extend(label_data.get("edges", []))
         except Exception as e:
-            print(f"[Document System] Error loading neo4j.json: {e}")
+            print(f"[Document System] Error loading 标签节点.json: {e}")
 
     # 2. 遍历所有 *_招标文件.json 文件
     for json_file in doc_dir.glob("*_招标文件.json"):
@@ -562,10 +562,12 @@ def get_folder_graph_data(folder_ids: List[int]) -> Dict[str, List[Dict[str, Any
 
 def build_entity_tree(folder_ids: List[int]) -> List[Dict[str, Any]]:
     """
-    构建实体树形结构
+    构建实体树形结构（三层结构）
 
-    以 neo4j.json 中的节点为根节点，
-    根据 edges 的 from 字段将其他节点挂载为 children
+    层级结构：
+    1. label (标签节点.json 中的节点，如 "项目类型")
+    2. label_node_entity (中间聚合层，按 label_node_entity 字段值聚合，如 "货物类")
+    3. 真实 node (招标文件中的具体节点)
 
     Args:
         folder_ids: 文件夹 ID 列表
@@ -578,14 +580,14 @@ def build_entity_tree(folder_ids: List[int]) -> List[Dict[str, Any]]:
     if not doc_dir.exists():
         return []
 
-    # 1. 加载 neo4j.json 作为根节点
+    # 1. 加载 标签节点.json 作为根节点 (第一层: label)
     root_nodes = {}  # id -> node
-    neo4j_file = doc_dir / "neo4j.json"
-    if neo4j_file.exists():
+    label_file = doc_dir / "标签节点.json"
+    if label_file.exists():
         try:
-            with open(neo4j_file, "r", encoding="utf-8") as f:
-                neo4j_data = json.load(f)
-                for node in neo4j_data.get("nodes", []):
+            with open(label_file, "r", encoding="utf-8") as f:
+                label_data = json.load(f)
+                for node in label_data.get("nodes", []):
                     node_id = node.get("id")
                     if node_id:
                         root_nodes[node_id] = {
@@ -593,56 +595,93 @@ def build_entity_tree(folder_ids: List[int]) -> List[Dict[str, Any]]:
                             "children": []
                         }
         except Exception as e:
-            print(f"[Document System] Error loading neo4j.json: {e}")
+            print(f"[Document System] Error loading 标签节点.json: {e}")
 
     # 2. 收集所有子节点和边
     all_child_nodes = {}  # id -> node
     all_edges = []
 
-    for json_file in doc_dir.glob("*_招标文件.json"):
-        try:
-            with open(json_file, "r", encoding="utf-8") as f:
-                file_data = json.load(f)
+    # 查找 *_招标文件.json 和 *_合同.json 文件
+    file_patterns = ["*_招标文件.json", "*_合同.json"]
 
-            # 检查 document_id 是否在目标文件夹列表中
-            metadata = file_data.get("metadata", {})
-            doc_id = metadata.get("document_id")
+    for pattern in file_patterns:
+        for json_file in doc_dir.glob(pattern):
+            try:
+                with open(json_file, "r", encoding="utf-8") as f:
+                    file_data = json.load(f)
 
-            if doc_id is not None:
-                doc_id_int = int(doc_id) if isinstance(doc_id, str) else doc_id
-                if doc_id_int in folder_ids:
-                    # 收集节点
-                    for node in file_data.get("nodes", []):
-                        node_id = node.get("id")
-                        if node_id and node_id not in root_nodes:
-                            all_child_nodes[node_id] = {
-                                **node,
-                                "children": []
-                            }
-                    # 收集边
-                    all_edges.extend(file_data.get("edges", []))
-        except Exception as e:
-            print(f"[Document System] Error loading {json_file.name}: {e}")
+                # 检查 document_id 是否在目标文件夹列表中
+                metadata = file_data.get("metadata", {})
+                doc_id = metadata.get("document_id")
 
-    # 3. 根据 edges 构建父子关系
-    # edge.from 是父节点 id，edge.to 是子节点 id
+                if doc_id is not None:
+                    doc_id_int = int(doc_id) if isinstance(doc_id, str) else doc_id
+                    if doc_id_int in folder_ids:
+                        # 收集节点
+                        for node in file_data.get("nodes", []):
+                            node_id = node.get("id")
+                            if node_id and node_id not in root_nodes:
+                                node_data = {
+                                    **node,
+                                    "children": []
+                                }
+                                # 当节点 type 为 attribute 时，添加 metadata 字段
+                                if node.get("type") == "attribute":
+                                    node_data["metadata"] = metadata
+                                all_child_nodes[node_id] = node_data
+                        # 收集边
+                        all_edges.extend(file_data.get("edges", []))
+            except Exception as e:
+                print(f"[Document System] Error loading {json_file.name}: {e}")
+
+    # 3. 根据 edges 构建三层结构
+    # edge.from 是 label 节点 id (第一层)
+    # 子节点的 label_node_entity 用于创建中间聚合层 (第二层)
+    # 子节点本身是真实节点 (第三层)
+
+    # 为每个 root_node 创建 label_node_entity 聚合字典
+    # 结构: root_node_id -> { label_node_entity_value -> aggregated_node }
+    entity_aggregation = {}  # root_id -> { entity_value -> { node_data, children: [real_nodes] } }
+
     for edge in all_edges:
         from_id = edge.get("from")
         to_id = edge.get("to")
 
         if from_id and to_id:
-            # 找父节点（在 root_nodes 中查找）
+            # 找父节点（在 root_nodes 中查找，第一层）
             parent_node = root_nodes.get(from_id)
-            # 找子节点
+            # 找子节点（真实节点，第三层）
             child_node = all_child_nodes.get(to_id)
 
             if parent_node and child_node:
-                # 检查是否已添加（避免重复）
-                exists = any(c.get("id") == to_id for c in parent_node["children"])
-                if not exists:
-                    parent_node["children"].append(child_node)
+                # 获取 label_node_entity 值用于聚合（第二层）
+                entity_value = child_node.get("label_node_entity", "未分类")
 
-    # 4. 返回根节点列表
+                # 初始化聚合结构
+                if from_id not in entity_aggregation:
+                    entity_aggregation[from_id] = {}
+
+                if entity_value not in entity_aggregation[from_id]:
+                    # 创建中间聚合节点 (第二层)
+                    entity_aggregation[from_id][entity_value] = {
+                        "id": f"{from_id}_{entity_value}",
+                        "label": entity_value,
+                        "type": "aggregate",
+                        "children": []
+                    }
+
+                # 将真实节点添加到聚合节点的 children 中（第三层）
+                # 检查是否已添加（避免重复）
+                exists = any(c.get("id") == to_id for c in entity_aggregation[from_id][entity_value]["children"])
+                if not exists:
+                    entity_aggregation[from_id][entity_value]["children"].append(child_node)
+
+    # 4. 将聚合节点挂载到根节点的 children 中
+    for root_id, entity_dict in entity_aggregation.items():
+        if root_id in root_nodes:
+            root_nodes[root_id]["children"] = list(entity_dict.values())
+
+    # 5. 返回根节点列表
     return list(root_nodes.values())
 
 
@@ -651,7 +690,7 @@ async def get_folder_entity(folder_id: int):
     """
     获取指定文件夹及其所有子文件夹的实体节点（树形结构）
 
-    以 neo4j.json 中的节点为根节点，
+    以 标签节点.json 中的节点为根节点，
     根据 edges 的 from 字段将其他节点挂载为 children
 
     Args:
@@ -704,19 +743,19 @@ async def get_folder_entity(folder_id: int):
 @router.get("/folder/graph", response_model=BaseResponse, summary="获取文件夹图数据")
 async def get_folder_graph(folder_id: int):
     """
-    获取指定文件夹及其所有子文件夹的完整图数据（nodes + edges）
+    获取图数据
+
+    直接读取 graph.jsonl 文件返回
 
     Args:
         folder_id: 文件夹ID
 
     Returns:
-        包含 nodes 和 edges 的图数据
+        graph.jsonl 中的图数据
     """
     try:
-        # 1. 加载文件夹数据
+        # 1. 加载文件夹数据，验证 folder_id 是否存在
         data = load_data()
-
-        # 2. 检查文件夹是否存在
         folder_node = find_node_by_id(data, folder_id)
         if not folder_node:
             return BaseResponse(
@@ -726,14 +765,29 @@ async def get_folder_graph(folder_id: int):
                 data=None
             )
 
-        # 3. 获取所有子文件夹 ID（包括自身）
-        children_ids = get_children_ids(data, folder_id)
-        all_folder_ids = [folder_id] + children_ids
+        # 2. 读取 graph.jsonl 文件
+        doc_dir = get_document_system_dir() / "document"
+        graph_file = doc_dir / "graph.jsonl"
 
-        # 4. 获取图数据
-        graph_data = get_folder_graph_data(all_folder_ids)
+        if not graph_file.exists():
+            return BaseResponse(
+                success=True,
+                errCode=None,
+                errMsg=None,
+                data={"elements": {"nodes": [], "edges": []}}
+            )
 
-        print(f"[Document System] Graph query for folder {folder_id}: {len(graph_data['nodes'])} nodes, {len(graph_data['edges'])} edges")
+        with open(graph_file, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # 去除 JSON 中的注释 (/* ... */ 和 // ...)
+        import re
+        content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
+        content = re.sub(r'//.*?$', '', content, flags=re.MULTILINE)
+
+        graph_data = json.loads(content)
+
+        print(f"[Document System] Graph query for folder {folder_id}")
 
         return BaseResponse(
             success=True,

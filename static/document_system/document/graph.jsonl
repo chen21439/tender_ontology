@@ -1,0 +1,289 @@
+{
+  "elements": {
+    "nodes": [
+      {
+        "data": {
+          "id": "project_LED_FA_2024_2025",
+          "label": "2024-2025年度LED显示屏框架协议采购",
+          "type": "Project",
+          "projectCode": "FA-2024-LED-001"
+        }
+      },
+      {
+        "data": {
+          "id": "entity_led_display",
+          "label": "LED显示屏",
+          "type": "Entity",
+          "entityType": "Category"
+        }
+      },
+      {
+        "data": {
+          "id": "entity_period_2024_2025",
+          "label": "2024-2025年度",
+          "type": "Entity",
+          "entityType": "Period"
+        }
+      },
+
+      /* ---- 参与投标的供应商 ---- */
+      {
+        "data": {
+          "id": "org_deyuntian",
+          "label": "德云天科技创新（深圳）有限公司",
+          "type": "Org",
+          "role": "supplier",
+          "frameworkStatus": "shortlisted"  // 入围
+        }
+      },
+      {
+        "data": {
+          "id": "org_dongfangliangcai",
+          "label": "东方亮彩科技（北京）有限公司",
+          "type": "Org",
+          "role": "supplier",
+          "frameworkStatus": "shortlisted"
+        }
+      },
+      {
+        "data": {
+          "id": "org_guangdong_baolun",
+          "label": "广东保伦电子股份有限公司",
+          "type": "Org",
+          "role": "supplier",
+          "frameworkStatus": "shortlisted"
+        }
+      },
+      {
+        "data": {
+          "id": "org_guangzhou_saishi",
+          "label": "广州市赛晟电子科技有限公司",
+          "type": "Org",
+          "role": "supplier",
+          "frameworkStatus": "not_shortlisted"
+        }
+      },
+      {
+        "data": {
+          "id": "org_shenzhen_bangyue",
+          "label": "深圳博邦悦光电有限公司",
+          "type": "Org",
+          "role": "supplier",
+          "frameworkStatus": "not_shortlisted"
+        }
+      },
+      {
+        "data": {
+          "id": "org_shenzhen_weiwei",
+          "label": "深圳维维商用科技有限公司",
+          "type": "Org",
+          "role": "supplier",
+          "frameworkStatus": "shortlisted"
+        }
+      },
+
+      /* ---- 调用订单/合同（模拟三次调用）---- */
+      {
+        "data": {
+          "id": "order_2024_01",
+          "label": "调用订单 2024-01",
+          "type": "Order",
+          "orderDate": "2024-12-15",
+          "amount": 300000
+        }
+      },
+      {
+        "data": {
+          "id": "order_2025_01",
+          "label": "调用订单 2025-01",
+          "type": "Order",
+          "orderDate": "2025-03-10",
+          "amount": 450000
+        }
+      },
+      {
+        "data": {
+          "id": "order_2025_02",
+          "label": "调用订单 2025-02",
+          "type": "Order",
+          "orderDate": "2025-06-20",
+          "amount": 520000
+        }
+      }
+    ],
+
+    "edges": [
+      /* 项目与两个实体 */
+      {
+        "data": {
+          "id": "e1",
+          "source": "project_LED_FA_2024_2025",
+          "target": "entity_led_display",
+          "type": "HAS_ENTITY",
+          "desc": "项目品类：LED显示屏"
+        }
+      },
+      {
+        "data": {
+          "id": "e2",
+          "source": "project_LED_FA_2024_2025",
+          "target": "entity_period_2024_2025",
+          "type": "HAS_ENTITY",
+          "desc": "框架适用年度"
+        }
+      },
+
+      /* 参与投标关系 */
+      {
+        "data": {
+          "id": "e10",
+          "source": "org_deyuntian",
+          "target": "project_LED_FA_2024_2025",
+          "type": "BID_FOR",
+          "desc": "参与该框架项目投标"
+        }
+      },
+      {
+        "data": {
+          "id": "e11",
+          "source": "org_dongfangliangcai",
+          "target": "project_LED_FA_2024_2025",
+          "type": "BID_FOR",
+          "desc": "参与该框架项目投标"
+        }
+      },
+      {
+        "data": {
+          "id": "e12",
+          "source": "org_guangdong_baolun",
+          "target": "project_LED_FA_2024_2025",
+          "type": "BID_FOR",
+          "desc": "参与该框架项目投标"
+        }
+      },
+      {
+        "data": {
+          "id": "e13",
+          "source": "org_guangzhou_saishi",
+          "target": "project_LED_FA_2024_2025",
+          "type": "BID_FOR",
+          "desc": "参与该框架项目投标"
+        }
+      },
+      {
+        "data": {
+          "id": "e14",
+          "source": "org_shenzhen_bangyue",
+          "target": "project_LED_FA_2024_2025",
+          "type": "BID_FOR",
+          "desc": "参与该框架项目投标"
+        }
+      },
+      {
+        "data": {
+          "id": "e15",
+          "source": "org_shenzhen_weiwei",
+          "target": "project_LED_FA_2024_2025",
+          "type": "BID_FOR",
+          "desc": "参与该框架项目投标"
+        }
+      },
+
+      /* 入围供应商（框架内供应商圈出来） */
+      {
+        "data": {
+          "id": "e20",
+          "source": "project_LED_FA_2024_2025",
+          "target": "org_deyuntian",
+          "type": "FRAMEWORK_SUPPLIER",
+          "desc": "框架入围供应商"
+        }
+      },
+      {
+        "data": {
+          "id": "e21",
+          "source": "project_LED_FA_2024_2025",
+          "target": "org_dongfangliangcai",
+          "type": "FRAMEWORK_SUPPLIER",
+          "desc": "框架入围供应商"
+        }
+      },
+      {
+        "data": {
+          "id": "e22",
+          "source": "project_LED_FA_2024_2025",
+          "target": "org_guangdong_baolun",
+          "type": "FRAMEWORK_SUPPLIER",
+          "desc": "框架入围供应商"
+        }
+      },
+      {
+        "data": {
+          "id": "e23",
+          "source": "project_LED_FA_2024_2025",
+          "target": "org_shenzhen_weiwei",
+          "type": "FRAMEWORK_SUPPLIER",
+          "desc": "框架入围供应商"
+        }
+      },
+
+      /* 调用订单/合同属于该框架 */
+      {
+        "data": {
+          "id": "e30",
+          "source": "order_2024_01",
+          "target": "project_LED_FA_2024_2025",
+          "type": "BELONGS_TO_FRAMEWORK",
+          "desc": "2024年一次调用订单"
+        }
+      },
+      {
+        "data": {
+          "id": "e31",
+          "source": "order_2025_01",
+          "target": "project_LED_FA_2024_2025",
+          "type": "BELONGS_TO_FRAMEWORK",
+          "desc": "2025年一次调用订单"
+        }
+      },
+      {
+        "data": {
+          "id": "e32",
+          "source": "order_2025_02",
+          "target": "project_LED_FA_2024_2025",
+          "type": "BELONGS_TO_FRAMEWORK",
+          "desc": "2025年第二次调用订单"
+        }
+      },
+
+      /* 调用订单/合同 与 实际成交供应商 */
+      {
+        "data": {
+          "id": "e40",
+          "source": "order_2024_01",
+          "target": "org_deyuntian",
+          "type": "AWARDED_TO",
+          "desc": "该次调用由德云天成交"
+        }
+      },
+      {
+        "data": {
+          "id": "e41",
+          "source": "order_2025_01",
+          "target": "org_dongfangliangcai",
+          "type": "AWARDED_TO",
+          "desc": "该次调用由东方亮彩成交"
+        }
+      },
+      {
+        "data": {
+          "id": "e42",
+          "source": "order_2025_02",
+          "target": "org_shenzhen_weiwei",
+          "type": "AWARDED_TO",
+          "desc": "该次调用由深圳维维成交"
+        }
+      }
+    ]
+  }
+}
