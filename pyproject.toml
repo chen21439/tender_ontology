@@ -22,7 +22,10 @@ dependencies = [
     "sqlalchemy (>=2.0.44,<3.0.0)",
     "pymysql (>=1.1.2,<2.0.0)",
     "docling-hierarchical-pdf (>=0.1.2,<0.2.0)",
-    "loguru (>=0.7.0,<0.8.0)"
+    "loguru (>=0.7.0,<0.8.0)",
+    "unstructured (>=0.17.0,<0.18.0)",
+    "pymupdf (>=1.26.0,<2.0.0)",
+    "neo4j (>=6.0.0,<7.0.0)"
 ]
 
 [tool.poetry]

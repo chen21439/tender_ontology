@@ -90,7 +90,6 @@ async def upload_pdf(
     app_id: Optional[str] = Form(None, description="租户ID"),
     create_user: Optional[str] = Form(None, description="创建用户ID"),
     create_user_name: Optional[str] = Form(None, description="创建用户名称"),
-    save_to_db: bool = Form(True, description="是否保存到数据库，默认True"),
     enable_docling: bool = Form(True, description="是否启用 Docling 自动处理，默认True")
 ):
     """
@@ -100,7 +99,7 @@ async def upload_pdf(
     1. 接收 PDF/DOCX 文件上传
     2. 生成唯一任务ID
     3. 保存文件到 static/upload/{task_id}/{原文件名}
-    4. 保存到 MySQL 数据库 (可选)
+    4. 创建任务记录（本地存储或MySQL）
     5. 根据文件类型自动分发到不同处理器:
        - PDF: Docling 处理
        - DOCX: Unstructured + 二次判定处理
@@ -126,77 +125,71 @@ async def upload_pdf(
         print(f"[File Upload] Filename: {file.filename}")
         print(f"[File Upload] Type: {file_type}")
         print(f"[File Upload] Project: {project_name or 'None'}")
-        print(f"[File Upload] Save to DB: {save_to_db}")
         print(f"[File Upload] ================================")
 
-        # 2. 先创建数据库记录，获取任务ID（作为唯一标识）
+        # 2. 创建任务记录，获取任务ID（作为唯一标识）
         task_id = None
         db_task_id = None
 
-        if save_to_db:
-            if is_local_mode():
-                # 本地存储模式
-                try:
-                    storage = get_local_storage()
-                    task = storage.create_task(
-                        file_name=file.filename,
-                        file_path=None,  # 稍后更新
-                        project_name=project_name,
-                        project_code=project_code,
-                        procurement_method=procurement_method,
-                        project_type=project_type,
-                        overview=overview,
-                        app_id=app_id,
-                        create_user=create_user,
-                        create_user_name=create_user_name
-                    )
-                    db_task_id = task["id"]
-                    task_id = str(db_task_id)
-                    print(f"[PDF Upload] Local storage record created, task_id: {task_id}")
-                except Exception as e:
-                    print(f"[PDF Upload] Local storage save failed: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    task_id = generate_task_id()
-                    print(f"[PDF Upload] Using generated task_id: {task_id}")
-            else:
-                # MySQL 模式
-                try:
-                    from tender_ontology.utils.db.mysql import get_db, ComplianceService
-
-                    # 使用全局数据库连接池
-                    mysql = get_db()
-
-                    # 创建合规审查任务（状态：解析中 = 3）
-                    service = ComplianceService(mysql)
-                    db_task = service.create_task_from_pdf(
-                        pdf_path=None,  # 稍后更新
-                        file_id=None,  # 自动生成
-                        project_name=project_name,
-                        project_code=project_code,
-                        procurement_method=procurement_method,
-                        project_type=project_type,
-                        overview=overview,
-                        app_id=app_id,
-                        create_user=create_user,
-                        create_user_name=create_user_name
-                    )
-
-                    db_task_id = db_task.id
-                    task_id = str(db_task_id)  # 使用数据库ID作为任务ID
-                    print(f"[PDF Upload] DB record created, task_id: {task_id}")
-
-                except Exception as e:
-                    print(f"[PDF Upload] DB save failed: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    # 如果数据库创建失败，使用生成的ID
-                    task_id = generate_task_id()
-                    print(f"[PDF Upload] Using generated task_id: {task_id}")
+        if is_local_mode():
+            # 本地存储模式
+            try:
+                storage = get_local_storage()
+                task = storage.create_task(
+                    file_name=file.filename,
+                    file_path=None,  # 稍后更新
+                    project_name=project_name,
+                    project_code=project_code,
+                    procurement_method=procurement_method,
+                    project_type=project_type,
+                    overview=overview,
+                    app_id=app_id,
+                    create_user=create_user,
+                    create_user_name=create_user_name
+                )
+                db_task_id = task["id"]
+                task_id = str(db_task_id)
+                print(f"[PDF Upload] Local storage record created, task_id: {task_id}")
+            except Exception as e:
+                print(f"[PDF Upload] Local storage save failed: {e}")
+                import traceback
+                traceback.print_exc()
+                task_id = generate_task_id()
+                print(f"[PDF Upload] Using generated task_id: {task_id}")
         else:
-            # 如果不保存到数据库，使用生成的ID
-            task_id = generate_task_id()
-            print(f"[PDF Upload] Using generated task_id: {task_id}")
+            # MySQL 模式
+            try:
+                from tender_ontology.utils.db.mysql import get_db, ComplianceService
+
+                # 使用全局数据库连接池
+                mysql = get_db()
+
+                # 创建合规审查任务（状态：解析中 = 3）
+                service = ComplianceService(mysql)
+                db_task = service.create_task_from_pdf(
+                    pdf_path=None,  # 稍后更新
+                    file_id=None,  # 自动生成
+                    project_name=project_name,
+                    project_code=project_code,
+                    procurement_method=procurement_method,
+                    project_type=project_type,
+                    overview=overview,
+                    app_id=app_id,
+                    create_user=create_user,
+                    create_user_name=create_user_name
+                )
+
+                db_task_id = db_task.id
+                task_id = str(db_task_id)  # 使用数据库ID作为任务ID
+                print(f"[PDF Upload] DB record created, task_id: {task_id}")
+
+            except Exception as e:
+                print(f"[PDF Upload] DB save failed: {e}")
+                import traceback
+                traceback.print_exc()
+                # 如果数据库创建失败，使用生成的ID
+                task_id = generate_task_id()
+                print(f"[PDF Upload] Using generated task_id: {task_id}")
 
         # 3. 保存 PDF 文件到 static/upload/{task_id}/ 目录
         task_dir = get_task_upload_dir(task_id)
@@ -208,8 +201,8 @@ async def upload_pdf(
 
         print(f"[PDF Upload] PDF saved: {pdf_path}")
 
-        # 4. 如果之前创建了数据库记录，更新 pdf_path 和文件名
-        if save_to_db and db_task_id:
+        # 4. 更新任务记录的文件路径
+        if db_task_id:
             if is_local_mode():
                 # 本地存储模式
                 try:
@@ -276,7 +269,7 @@ async def upload_pdf(
             "fileName": file.filename,
             "fileType": file_type,
             "projectName": project_name,
-            "savedToDb": save_to_db and db_task_id is not None,
+            "savedToDb": db_task_id is not None,
             "processingEnabled": enable_docling,
             "message": f"{file_type.upper()} 上传成功" + (f", 后台处理中..." if enable_docling else "")
         }

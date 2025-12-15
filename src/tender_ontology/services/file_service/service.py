@@ -222,6 +222,7 @@ class FileService:
 
             # 处理 PDF 结果
             id_to_location = {}
+            page_heights = {}
             if pdf_result:
                 artifacts["docx_pdf"] = pdf_result
                 artifacts["pdf_path"] = pdf_result.get("pdf_path", "")
@@ -230,6 +231,11 @@ class FileService:
                 # 解析位置信息
                 id_to_location = self._parse_location_files(output_dir)
                 print(f"[FileService] 解析位置信息: {len(id_to_location)} 个元素")
+
+                # 从 PDF 提取页面高度（用于坐标系转换）
+                pdf_path = Path(pdf_result.get("pdf_path", ""))
+                if pdf_path.exists():
+                    page_heights = self._extract_page_heights_from_pdf(pdf_path)
 
             # 处理 Unstructured 结果
             print(f"[FileService] Unstructured 提取完成")
@@ -256,7 +262,8 @@ class FileService:
                     task_id=task_id,
                     output_dir=output_dir,
                     file_stem=file_path.stem,
-                    all_headings=all_headings
+                    all_headings=all_headings,
+                    page_heights=page_heights
                 )
                 if onto_result:
                     artifacts.update(onto_result)
@@ -424,7 +431,8 @@ class FileService:
         task_id: str,
         output_dir: Path,
         file_stem: str,
-        all_headings: list
+        all_headings: list,
+        page_heights: Optional[Dict[int, float]] = None
     ) -> Optional[Dict[str, Any]]:
         """
         使用 LevelTreeConstructor 构建文档树，生成 agent.json 并调用 extract_onto API
@@ -435,6 +443,7 @@ class FileService:
             file_stem: 文件名（不含扩展名）
             all_headings: Unstructured 提取的标题列表
                 格式: [{id, text, level, type?}, ...]
+            page_heights: 页码 -> 页面高度映射，用于坐标系转换
 
         Returns:
             包含 agent_path 和 ontology_path 的字典，或 None
@@ -531,7 +540,7 @@ class FileService:
                                 "pid": prev_id,
                                 "title": prev_text,
                                 "content": prev_text,
-                                "location": self._get_location_for_id(prev_id, id_to_location),
+                                "location": self._get_location_for_id(prev_id, id_to_location, page_heights),
                                 "children": sub_children if sub_children else None
                             })
                         else:
@@ -542,7 +551,7 @@ class FileService:
                                     "pid": pre_id,
                                     "title": "",
                                     "content": pre_item.get("text", ""),
-                                    "location": self._get_location_for_id(pre_id, id_to_location)
+                                    "location": self._get_location_for_id(pre_id, id_to_location, page_heights)
                                 })
                             pre_heading_items = []
 
@@ -567,7 +576,7 @@ class FileService:
                         "pid": prev_id,
                         "title": prev_text,
                         "content": prev_text,
-                        "location": self._get_location_for_id(prev_id, id_to_location),
+                        "location": self._get_location_for_id(prev_id, id_to_location, page_heights),
                         "children": sub_children if sub_children else None
                     })
                 else:
@@ -578,7 +587,7 @@ class FileService:
                             "pid": item_id,
                             "title": "",
                             "content": item.get("text", ""),
-                            "location": self._get_location_for_id(item_id, id_to_location)
+                            "location": self._get_location_for_id(item_id, id_to_location, page_heights)
                         })
 
                 # 移除空的 children
@@ -610,7 +619,7 @@ class FileService:
                         "pid": item_id,
                         "title": "",
                         "content": item.get("text", ""),
-                        "location": self._get_location_for_id(item_id, id_to_location)
+                        "location": self._get_location_for_id(item_id, id_to_location, page_heights)
                     })
 
             # 处理每个一级标题
@@ -635,7 +644,7 @@ class FileService:
                     "pid": first_id,
                     "title": first_text,
                     "content": first_text,
-                    "location": self._get_location_for_id(first_id, id_to_location)
+                    "location": self._get_location_for_id(first_id, id_to_location, page_heights)
                 }
                 if sub_children:
                     root_node["children"] = sub_children
@@ -644,7 +653,11 @@ class FileService:
 
             print(f"[FileService] 树构建完成，根节点数: {len(structured_data)}")
 
-            # 5. 保存 _agent.json
+            # 5. 聚合连续的空 title 节点
+            structured_data = self._aggregate_empty_title_nodes(structured_data)
+            print(f"[FileService] 空 title 节点聚合完成")
+
+            # 6. 保存 _agent.json
             agent_path = output_dir / f"{file_stem}_agent.json"
             agent_path.write_text(
                 json.dumps(structured_data, ensure_ascii=False, indent=2),
@@ -705,6 +718,111 @@ class FileService:
             import traceback
             traceback.print_exc()
             return None
+
+    def _aggregate_empty_title_nodes(self, nodes: list) -> list:
+        """
+        聚合连续的空 title 节点
+
+        将 children 中连续的 title="" 的元素合并成一个：
+        - pid: 改成数组，包含所有被合并元素的 pid
+        - content: 用 \\n 拼接
+        - location: 合并所有 location 数组元素
+
+        Args:
+            nodes: 节点列表
+
+        Returns:
+            聚合后的节点列表
+        """
+        if not nodes:
+            return nodes
+
+        result = []
+
+        for node in nodes:
+            # 递归处理 children
+            if "children" in node and node["children"]:
+                node["children"] = self._aggregate_children_empty_title(node["children"])
+
+            result.append(node)
+
+        return result
+
+    def _aggregate_children_empty_title(self, children: list) -> list:
+        """
+        聚合 children 数组中连续的空 title 节点
+
+        Args:
+            children: 子节点列表
+
+        Returns:
+            聚合后的子节点列表
+        """
+        if not children:
+            return children
+
+        result = []
+        pending_group = []  # 待聚合的连续空 title 节点
+
+        for child in children:
+            is_empty_title = child.get("title", "") == ""
+
+            if is_empty_title:
+                # 空 title，加入待聚合组
+                pending_group.append(child)
+            else:
+                # 非空 title，先处理待聚合组
+                if pending_group:
+                    aggregated = self._merge_nodes(pending_group)
+                    result.append(aggregated)
+                    pending_group = []
+
+                # 递归处理当前节点的 children
+                if "children" in child and child["children"]:
+                    child["children"] = self._aggregate_children_empty_title(child["children"])
+
+                result.append(child)
+
+        # 处理最后的待聚合组
+        if pending_group:
+            aggregated = self._merge_nodes(pending_group)
+            result.append(aggregated)
+
+        return result
+
+    def _merge_nodes(self, nodes: list) -> dict:
+        """
+        合并多个节点为一个
+
+        Args:
+            nodes: 要合并的节点列表
+
+        Returns:
+            合并后的单个节点
+        """
+        if len(nodes) == 1:
+            return nodes[0]
+
+        # 收集所有 pid
+        pids = [node.get("pid", "") for node in nodes]
+
+        # 拼接 content
+        contents = [node.get("content", "") for node in nodes]
+        merged_content = "\n".join(contents)
+
+        # 合并 location
+        merged_location = []
+        for node in nodes:
+            loc = node.get("location", [])
+            if loc:
+                merged_location.extend(loc)
+
+        return {
+            "pid": pids,
+            "title": "",
+            "content": merged_content,
+            "location": merged_location
+        }
 
     def _backfill_location_to_fulltext(
         self,
@@ -832,23 +950,75 @@ class FileService:
 
         return id_to_location
 
-    def _get_location_for_id(self, item_id: str, id_to_location: Dict[str, Dict[str, Any]]) -> list:
+    def _extract_page_heights_from_pdf(self, pdf_path: Path) -> Dict[int, float]:
         """
-        根据 id 获取 location 列表
+        从 PDF 文件中提取每页的高度
+
+        Args:
+            pdf_path: PDF 文件路径
+
+        Returns:
+            页码到页面高度的映射: {1: 841.89, 2: 841.89, ...}
+        """
+        page_heights = {}
+
+        try:
+            import fitz  # pymupdf
+
+            doc = fitz.open(str(pdf_path))
+            for page_idx in range(len(doc)):
+                page = doc[page_idx]
+                rect = page.rect
+                # 页码从 1 开始
+                page_heights[page_idx + 1] = rect.height
+            doc.close()
+
+            print(f"[FileService] 提取 PDF 页面高度: {len(page_heights)} 页")
+
+        except ImportError:
+            print(f"[FileService] 警告: pymupdf 未安装，无法提取页面高度")
+        except Exception as e:
+            print(f"[FileService] 提取页面高度失败: {e}")
+
+        return page_heights
+
+    def _get_location_for_id(
+        self,
+        item_id: str,
+        id_to_location: Dict[str, Dict[str, Any]],
+        page_heights: Optional[Dict[int, float]] = None
+    ) -> list:
+        """
+        根据 id 获取 location 列表，统一为 l,t,r,b 格式，并转换为 TOPLEFT 坐标系
+
+        输入 bbox 格式 (PDF用户空间，左下角原点):
+            [x0, y0, x1, y1]
+            - x0: 左边界
+            - y0: 底部 (y值较小)
+            - x1: 右边界
+            - y1: 顶部 (y值较大)
+
+        输出格式 (TOPLEFT 坐标系，左上角原点):
+            {"page": 1, "l": x0, "t": new_t, "r": x1, "b": new_b, "coord_origin": "TOPLEFT"}
+            - l: 左边界 = x0
+            - r: 右边界 = x1
+            - t: 顶部 = page_height - y1 (转换后，值小表示位置高)
+            - b: 底部 = page_height - y0 (转换后，值大表示位置低)
 
         Args:
             item_id: 元素 ID (如 P_00001, t001)
             id_to_location: id -> page/bbox 映射
+            page_heights: 页码 -> 页面高度映射，用于坐标系转换
 
         Returns:
-            location 列表: [{"page": 1, "bbox": [x1,y1,x2,y2]}, ...]
+            location 列表: [{"page": 1, "l": ..., "t": ..., "r": ..., "b": ..., "coord_origin": "TOPLEFT"}, ...]
         """
         # 尝试直接匹配
         loc_info = id_to_location.get(item_id)
 
         # 如果是 P_00001 格式，尝试转换为 p001 格式
         if not loc_info and item_id.startswith("P_"):
-            # P_00001 -> p1
+            # P_00001 -> p001
             try:
                 num = int(item_id.replace("P_", ""))
                 alt_id = f"p{num:03d}"
@@ -862,7 +1032,7 @@ class FileService:
         page_str = loc_info.get("page", "")
         bbox_str = loc_info.get("bbox", "")
 
-        # 处理跨页情况: page="1|2" bbox="x1,y1,x2,y2|x3,y3,x4,y4"
+        # 处理跨页情况: page="1|2" bbox="x0,y0,x1,y1|x0,y0,x1,y1"
         pages = page_str.split("|")
         bboxes = bbox_str.split("|")
 
@@ -871,10 +1041,44 @@ class FileService:
             try:
                 page_num = int(page)
                 bbox_coords = [float(x) for x in bboxes[i].split(",")] if i < len(bboxes) else []
-                locations.append({
-                    "page": page_num,
-                    "bbox": bbox_coords
-                })
+
+                if len(bbox_coords) >= 4:
+                    # 原始坐标 (PDF用户空间，左下角原点)
+                    x0, y0, x1, y1 = bbox_coords[0], bbox_coords[1], bbox_coords[2], bbox_coords[3]
+
+                    # 获取页面高度
+                    page_height = page_heights.get(page_num) if page_heights else None
+
+                    if page_height:
+                        # 转换为 TOPLEFT 坐标系
+                        # y' = page_height - y
+                        # 原 y1 (顶部，值大) -> 新 t (值小，表示距顶部近)
+                        # 原 y0 (底部，值小) -> 新 b (值大，表示距顶部远)
+                        new_t = round(page_height - y1, 4)
+                        new_b = round(page_height - y0, 4)
+
+                        locations.append({
+                            "page": page_num,
+                            "l": round(x0, 4),
+                            "t": new_t,
+                            "r": round(x1, 4),
+                            "b": new_b,
+                            "coord_origin": "TOPLEFT"
+                        })
+                    else:
+                        # 没有页面高度，保持原始坐标但标记为 BOTTOMLEFT
+                        locations.append({
+                            "page": page_num,
+                            "l": round(x0, 4),
+                            "t": round(y1, 4),  # 原 y1 是顶部
+                            "r": round(x1, 4),
+                            "b": round(y0, 4),  # 原 y0 是底部
+                            "coord_origin": "BOTTOMLEFT"
+                        })
+                else:
+                    # bbox 不完整，跳过
+                    continue
+
             except (ValueError, IndexError):
                 continue
 

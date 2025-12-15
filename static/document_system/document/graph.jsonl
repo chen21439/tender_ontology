@@ -1,18 +1,48 @@
 {
   "elements": {
     "nodes": [
+      /* ==================== Project 框架项目 ==================== */
       {
         "data": {
           "id": "project_LED_FA_2024_2025",
           "label": "2024-2025年度LED显示屏框架协议采购",
           "type": "Project",
-          "projectCode": "FA-2024-LED-001"
+          "projectCode": "FA-2024-LED-001",
+          "status": "active"
         }
       },
       {
         "data": {
+          "id": "project_LED_FA_2023_2024",
+          "label": "2023-2024年度LED显示屏框架协议采购",
+          "type": "Project",
+          "projectCode": "FA-2023-LED-001",
+          "status": "completed"
+        }
+      },
+      {
+        "data": {
+          "id": "project_AV_FA_2024",
+          "label": "2024年度音视频设备框架协议采购",
+          "type": "Project",
+          "projectCode": "FA-2024-AV-001",
+          "status": "active"
+        }
+      },
+
+      /* ==================== Entity 业务属性节点 ==================== */
+      {
+        "data": {
           "id": "entity_led_display",
           "label": "LED显示屏",
+          "type": "Entity",
+          "entityType": "Category"
+        }
+      },
+      {
+        "data": {
+          "id": "entity_av_equipment",
+          "label": "音视频设备",
           "type": "Entity",
           "entityType": "Category"
         }
@@ -25,15 +55,31 @@
           "entityType": "Period"
         }
       },
+      {
+        "data": {
+          "id": "entity_period_2023_2024",
+          "label": "2023-2024年度",
+          "type": "Entity",
+          "entityType": "Period"
+        }
+      },
+      {
+        "data": {
+          "id": "entity_period_2024",
+          "label": "2024年度",
+          "type": "Entity",
+          "entityType": "Period"
+        }
+      },
 
-      /* ---- 参与投标的供应商 ---- */
+      /* ==================== Org 供应商 ==================== */
       {
         "data": {
           "id": "org_deyuntian",
           "label": "德云天科技创新（深圳）有限公司",
           "type": "Org",
           "role": "supplier",
-          "frameworkStatus": "shortlisted"  // 入围
+          "frameworkStatus": "shortlisted"
         }
       },
       {
@@ -82,14 +128,51 @@
         }
       },
 
-      /* ---- 调用订单/合同（模拟三次调用）---- */
+      /* ==================== Dept 使用部门 ==================== */
+      {
+        "data": {
+          "id": "dept_jiaotong",
+          "label": "深圳市交通运输局",
+          "type": "Dept",
+          "deptCode": "DEPT-001"
+        }
+      },
+      {
+        "data": {
+          "id": "dept_jiaoyu",
+          "label": "深圳市教育局",
+          "type": "Dept",
+          "deptCode": "DEPT-002"
+        }
+      },
+      {
+        "data": {
+          "id": "dept_chengguang",
+          "label": "深圳市城管和综合执法局",
+          "type": "Dept",
+          "deptCode": "DEPT-003"
+        }
+      },
+      {
+        "data": {
+          "id": "dept_weijian",
+          "label": "深圳市卫生健康委员会",
+          "type": "Dept",
+          "deptCode": "DEPT-004"
+        }
+      },
+
+      /* ==================== Order 调用订单 ==================== */
+      // 2024-2025 LED框架的订单
       {
         "data": {
           "id": "order_2024_01",
           "label": "调用订单 2024-01",
           "type": "Order",
+          "orderCode": "ORD-2024-LED-001",
           "orderDate": "2024-12-15",
-          "amount": 300000
+          "amount": 300000,
+          "status": "completed"
         }
       },
       {
@@ -97,8 +180,10 @@
           "id": "order_2025_01",
           "label": "调用订单 2025-01",
           "type": "Order",
+          "orderCode": "ORD-2025-LED-001",
           "orderDate": "2025-03-10",
-          "amount": 450000
+          "amount": 450000,
+          "status": "completed"
         }
       },
       {
@@ -106,14 +191,51 @@
           "id": "order_2025_02",
           "label": "调用订单 2025-02",
           "type": "Order",
+          "orderCode": "ORD-2025-LED-002",
           "orderDate": "2025-06-20",
-          "amount": 520000
+          "amount": 520000,
+          "status": "in_progress"
+        }
+      },
+      // 2023-2024 LED框架的订单
+      {
+        "data": {
+          "id": "order_2023_01",
+          "label": "调用订单 2023-01",
+          "type": "Order",
+          "orderCode": "ORD-2023-LED-001",
+          "orderDate": "2023-08-20",
+          "amount": 280000,
+          "status": "completed"
+        }
+      },
+      {
+        "data": {
+          "id": "order_2024_02",
+          "label": "调用订单 2024-02",
+          "type": "Order",
+          "orderCode": "ORD-2024-LED-002",
+          "orderDate": "2024-02-15",
+          "amount": 350000,
+          "status": "completed"
+        }
+      },
+      // 音视频框架的订单
+      {
+        "data": {
+          "id": "order_av_2024_01",
+          "label": "音视频调用订单 2024-01",
+          "type": "Order",
+          "orderCode": "ORD-2024-AV-001",
+          "orderDate": "2024-09-10",
+          "amount": 180000,
+          "status": "completed"
         }
       }
     ],
 
     "edges": [
-      /* 项目与两个实体 */
+      /* ==================== HAS_ENTITY: Project → Entity ==================== */
       {
         "data": {
           "id": "e1",
@@ -132,8 +254,45 @@
           "desc": "框架适用年度"
         }
       },
+      {
+        "data": {
+          "id": "e3",
+          "source": "project_LED_FA_2023_2024",
+          "target": "entity_led_display",
+          "type": "HAS_ENTITY",
+          "desc": "项目品类：LED显示屏"
+        }
+      },
+      {
+        "data": {
+          "id": "e4",
+          "source": "project_LED_FA_2023_2024",
+          "target": "entity_period_2023_2024",
+          "type": "HAS_ENTITY",
+          "desc": "框架适用年度"
+        }
+      },
+      {
+        "data": {
+          "id": "e5",
+          "source": "project_AV_FA_2024",
+          "target": "entity_av_equipment",
+          "type": "HAS_ENTITY",
+          "desc": "项目品类：音视频设备"
+        }
+      },
+      {
+        "data": {
+          "id": "e6",
+          "source": "project_AV_FA_2024",
+          "target": "entity_period_2024",
+          "type": "HAS_ENTITY",
+          "desc": "框架适用年度"
+        }
+      },
 
-      /* 参与投标关系 */
+      /* ==================== BID_FOR: Org → Project (参与投标) ==================== */
+      // 2024-2025 LED框架投标
       {
         "data": {
           "id": "e10",
@@ -188,8 +347,56 @@
           "desc": "参与该框架项目投标"
         }
       },
+      // 2023-2024 LED框架投标
+      {
+        "data": {
+          "id": "e16",
+          "source": "org_deyuntian",
+          "target": "project_LED_FA_2023_2024",
+          "type": "BID_FOR",
+          "desc": "参与该框架项目投标"
+        }
+      },
+      {
+        "data": {
+          "id": "e17",
+          "source": "org_dongfangliangcai",
+          "target": "project_LED_FA_2023_2024",
+          "type": "BID_FOR",
+          "desc": "参与该框架项目投标"
+        }
+      },
+      {
+        "data": {
+          "id": "e18",
+          "source": "org_guangdong_baolun",
+          "target": "project_LED_FA_2023_2024",
+          "type": "BID_FOR",
+          "desc": "参与该框架项目投标"
+        }
+      },
+      // 音视频框架投标
+      {
+        "data": {
+          "id": "e19",
+          "source": "org_guangdong_baolun",
+          "target": "project_AV_FA_2024",
+          "type": "BID_FOR",
+          "desc": "参与该框架项目投标"
+        }
+      },
+      {
+        "data": {
+          "id": "e19b",
+          "source": "org_shenzhen_weiwei",
+          "target": "project_AV_FA_2024",
+          "type": "BID_FOR",
+          "desc": "参与该框架项目投标"
+        }
+      },
 
-      /* 入围供应商（框架内供应商圈出来） */
+      /* ==================== FRAMEWORK_SUPPLIER: Project → Org (入围) ==================== */
+      // 2024-2025 LED框架入围
       {
         "data": {
           "id": "e20",
@@ -226,8 +433,56 @@
           "desc": "框架入围供应商"
         }
       },
+      // 2023-2024 LED框架入围
+      {
+        "data": {
+          "id": "e24",
+          "source": "project_LED_FA_2023_2024",
+          "target": "org_deyuntian",
+          "type": "FRAMEWORK_SUPPLIER",
+          "desc": "框架入围供应商"
+        }
+      },
+      {
+        "data": {
+          "id": "e25",
+          "source": "project_LED_FA_2023_2024",
+          "target": "org_dongfangliangcai",
+          "type": "FRAMEWORK_SUPPLIER",
+          "desc": "框架入围供应商"
+        }
+      },
+      {
+        "data": {
+          "id": "e26",
+          "source": "project_LED_FA_2023_2024",
+          "target": "org_guangdong_baolun",
+          "type": "FRAMEWORK_SUPPLIER",
+          "desc": "框架入围供应商"
+        }
+      },
+      // 音视频框架入围
+      {
+        "data": {
+          "id": "e27",
+          "source": "project_AV_FA_2024",
+          "target": "org_guangdong_baolun",
+          "type": "FRAMEWORK_SUPPLIER",
+          "desc": "框架入围供应商"
+        }
+      },
+      {
+        "data": {
+          "id": "e28",
+          "source": "project_AV_FA_2024",
+          "target": "org_shenzhen_weiwei",
+          "type": "FRAMEWORK_SUPPLIER",
+          "desc": "框架入围供应商"
+        }
+      },
 
-      /* 调用订单/合同属于该框架 */
+      /* ==================== BELONGS_TO_FRAMEWORK: Order → Project ==================== */
+      // 2024-2025 LED框架订单
       {
         "data": {
           "id": "e30",
@@ -255,8 +510,38 @@
           "desc": "2025年第二次调用订单"
         }
       },
+      // 2023-2024 LED框架订单
+      {
+        "data": {
+          "id": "e33",
+          "source": "order_2023_01",
+          "target": "project_LED_FA_2023_2024",
+          "type": "BELONGS_TO_FRAMEWORK",
+          "desc": "2023年调用订单"
+        }
+      },
+      {
+        "data": {
+          "id": "e34",
+          "source": "order_2024_02",
+          "target": "project_LED_FA_2023_2024",
+          "type": "BELONGS_TO_FRAMEWORK",
+          "desc": "2024年调用订单"
+        }
+      },
+      // 音视频框架订单
+      {
+        "data": {
+          "id": "e35",
+          "source": "order_av_2024_01",
+          "target": "project_AV_FA_2024",
+          "type": "BELONGS_TO_FRAMEWORK",
+          "desc": "音视频设备调用订单"
+        }
+      },
 
-      /* 调用订单/合同 与 实际成交供应商 */
+      /* ==================== AWARDED_TO: Order → Org (成交) ==================== */
+      // 2024-2025 LED框架成交
       {
         "data": {
           "id": "e40",
@@ -282,6 +567,91 @@
           "target": "org_shenzhen_weiwei",
           "type": "AWARDED_TO",
           "desc": "该次调用由深圳维维成交"
+        }
+      },
+      // 2023-2024 LED框架成交
+      {
+        "data": {
+          "id": "e43",
+          "source": "order_2023_01",
+          "target": "org_deyuntian",
+          "type": "AWARDED_TO",
+          "desc": "该次调用由德云天成交"
+        }
+      },
+      {
+        "data": {
+          "id": "e44",
+          "source": "order_2024_02",
+          "target": "org_guangdong_baolun",
+          "type": "AWARDED_TO",
+          "desc": "该次调用由广东保伦成交"
+        }
+      },
+      // 音视频框架成交
+      {
+        "data": {
+          "id": "e45",
+          "source": "order_av_2024_01",
+          "target": "org_guangdong_baolun",
+          "type": "AWARDED_TO",
+          "desc": "该次调用由广东保伦成交"
+        }
+      },
+
+      /* ==================== USES_FRAMEWORK: Dept → Project ==================== */
+      {
+        "data": {
+          "id": "e50",
+          "source": "dept_jiaotong",
+          "target": "project_LED_FA_2024_2025",
+          "type": "USES_FRAMEWORK",
+          "desc": "交通运输局使用该框架"
+        }
+      },
+      {
+        "data": {
+          "id": "e51",
+          "source": "dept_jiaoyu",
+          "target": "project_LED_FA_2024_2025",
+          "type": "USES_FRAMEWORK",
+          "desc": "教育局使用该框架"
+        }
+      },
+      {
+        "data": {
+          "id": "e52",
+          "source": "dept_chengguang",
+          "target": "project_LED_FA_2024_2025",
+          "type": "USES_FRAMEWORK",
+          "desc": "城管局使用该框架"
+        }
+      },
+      {
+        "data": {
+          "id": "e53",
+          "source": "dept_jiaotong",
+          "target": "project_LED_FA_2023_2024",
+          "type": "USES_FRAMEWORK",
+          "desc": "交通运输局使用该框架"
+        }
+      },
+      {
+        "data": {
+          "id": "e54",
+          "source": "dept_weijian",
+          "target": "project_AV_FA_2024",
+          "type": "USES_FRAMEWORK",
+          "desc": "卫健委使用该框架"
+        }
+      },
+      {
+        "data": {
+          "id": "e55",
+          "source": "dept_jiaoyu",
+          "target": "project_AV_FA_2024",
+          "type": "USES_FRAMEWORK",
+          "desc": "教育局使用该框架"
         }
       }
     ]

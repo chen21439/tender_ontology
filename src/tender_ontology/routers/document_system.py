@@ -50,6 +50,7 @@ class FolderInfo(BaseModel):
 
 class TreeNode(BaseModel):
     """树节点（返回给前端）"""
+
     id: int = Field(..., description="节点ID")
     parent_id: Optional[int] = Field(None, description="父节点ID")
     code: str = Field(..., description="节点编码")

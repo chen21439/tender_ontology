@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from tender_ontology.routers import health, ontology, pdf_upload, knowledge_graph, document_system
+from tender_ontology.routers import health, ontology, pdf_upload, knowledge_graph, document_system, graph_qa
 from tender_ontology.utils.db.local_storage import is_local_mode
 
 # 日志配置
@@ -72,6 +72,7 @@ app.include_router(ontology.router, tags=["ontology"])
 app.include_router(pdf_upload.router, prefix="/api/pdf", tags=["PDF上传"])
 app.include_router(knowledge_graph.router, prefix="/api/knowledge", tags=["知识图谱"])
 app.include_router(document_system.router, prefix="/api", tags=["文档系统"])
+app.include_router(graph_qa.router, prefix="/api", tags=["图谱问答"])
 
 # 兼容 nginx 转发路径 /python/...
 # 所有 API 都可以通过 /python/... 访问
@@ -80,6 +81,7 @@ app.include_router(ontology.router, prefix="/python", tags=["ontology(兼容)"])
 app.include_router(pdf_upload.router, prefix="/python/api/pdf", tags=["PDF上传(兼容)"])
 app.include_router(knowledge_graph.router, prefix="/python/api/knowledge", tags=["知识图谱(兼容)"])
 app.include_router(document_system.router, prefix="/python/api", tags=["文档系统(兼容)"])
+app.include_router(graph_qa.router, prefix="/python/api", tags=["图谱问答(兼容)"])
 
 # Mount static files
 # Get project root (tender_ontology directory where pyproject.toml is located)
