@@ -13,7 +13,10 @@ from fastapi.responses import FileResponse
 from tender_ontology.routers import health, ontology, pdf_upload, knowledge_graph, document_system, graph_qa
 from tender_ontology.utils.db.local_storage import is_local_mode
 
-# 日志配置
+# 初始化 loguru 日志配置（导入即触发 setup_logging）
+from tender_ontology.config.logging_config import logger as loguru_logger
+
+# 标准 logging 配置（用于 uvicorn 等第三方库）
 import logging
 
 # 关闭 urllib3 的 DEBUG 日志

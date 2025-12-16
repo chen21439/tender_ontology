@@ -24,6 +24,8 @@ import logging
 # 关闭 unstructured 的 trace 日志
 logging.getLogger("unstructured.trace").setLevel(logging.WARNING)
 
+from tender_ontology.config.logging_config import logger
+
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
@@ -262,7 +264,8 @@ class UnstructuredHeadingExtractor:
         idx_to_heading_candidate = {}
 
         table_count = 0
-        paragraph_count = 0
+        paragraph_count = 0  # 非空段落数
+        total_non_table_count = 0  # 总的非表格元素数（包括空的）
 
         # 第一遍：分配 ID 并判断标题候选项
         for idx, el in enumerate(elements):
@@ -270,29 +273,34 @@ class UnstructuredHeadingExtractor:
             text = (el.text or "").strip()
 
             if cat in ["Table", "TableChunk"]:
-                table_id = f"t{table_count:03d}-r000-c000-p000"
+                # 表格 ID 从 t001 开始（1-indexed），与 paragraph.txt 保持一致
+                table_id = f"t{table_count + 1:03d}"
                 idx_to_paragraph_id[idx] = table_id
                 idx_to_heading_candidate[idx] = False
                 if text or (hasattr(el, "metadata") and hasattr(el.metadata, "text_as_html") and el.metadata.text_as_html):
                     table_count += 1
-            elif text:
-                para_id = f"P_{paragraph_count:05d}"
-                idx_to_paragraph_id[idx] = para_id
-                paragraph_count += 1
+            else:
+                # 统计所有非表格元素（包括空的）
+                total_non_table_count += 1
 
-                # 判断是否是标题候选项
-                is_heading_candidate = False
-                xml_info = xml_info_map.get(idx, {})
-                alignment = xml_info.get("alignment") if xml_info else None
+                if text:
+                    para_id = f"P_{paragraph_count:05d}"
+                    idx_to_paragraph_id[idx] = para_id
+                    paragraph_count += 1
 
-                if cat in ["Title", "Header", "SectionHeader"]:
-                    is_heading_candidate = True
-                if alignment == "center":
-                    is_heading_candidate = True
-                if xml_info.get("is_fake_centered"):
-                    is_heading_candidate = True
+                    # 判断是否是标题候选项
+                    is_heading_candidate = False
+                    xml_info = xml_info_map.get(idx, {})
+                    alignment = xml_info.get("alignment") if xml_info else None
 
-                idx_to_heading_candidate[idx] = is_heading_candidate
+                    if cat in ["Title", "Header", "SectionHeader"]:
+                        is_heading_candidate = True
+                    if alignment == "center":
+                        is_heading_candidate = True
+                    if xml_info.get("is_fake_centered"):
+                        is_heading_candidate = True
+
+                    idx_to_heading_candidate[idx] = is_heading_candidate
 
         # 第二遍：生成 fulltext.md
         fulltext_md_path = docx_path.parent / f"{docx_path.stem}_unstructured_fulltext.md"
@@ -313,7 +321,7 @@ class UnstructuredHeadingExtractor:
                 if hasattr(el, "metadata") and hasattr(el.metadata, "text_as_html"):
                     html_text = el.metadata.text_as_html
 
-                table_id = idx_to_paragraph_id.get(idx, f"t{actual_table_count:03d}-r000-c000-p000")
+                table_id = idx_to_paragraph_id.get(idx, f"t{actual_table_count + 1:03d}")
 
                 if html_text:
                     fulltext_lines.append(f"[Table] {table_id}")
@@ -348,9 +356,9 @@ class UnstructuredHeadingExtractor:
 
         fulltext_md_path.write_text("\n".join(fulltext_lines), encoding='utf-8')
 
-        if self.verbose:
-            heading_candidate_count = sum(1 for v in idx_to_heading_candidate.values() if v)
-            print(f"[Unstructured] 已生成: {fulltext_md_path.name} ({actual_paragraph_count} 个段落, {actual_table_count} 个表格, {heading_candidate_count} 个标题候选)")
+        # 始终打印统计信息（用于与 ZIP 位置信息对比）
+        heading_candidate_count = sum(1 for v in idx_to_heading_candidate.values() if v)
+        logger.info(f"[Unstructured] 已生成: {fulltext_md_path.name} ({total_non_table_count} 个段落 (非空: {actual_paragraph_count}), {actual_table_count} 个表格, {heading_candidate_count} 个标题候选)")
 
         # ========== 提取标题类元素 ==========
         header_types = []

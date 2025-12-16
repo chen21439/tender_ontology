@@ -14,6 +14,9 @@ from loguru import logger
 
 from tender_ontology.config.settings import settings
 
+# 标志：是否已初始化
+_initialized = False
+
 
 def setup_logging(
     log_dir: str = "log",
@@ -32,6 +35,12 @@ def setup_logging(
         compression: 压缩格式，如 "zip", "gz"
         log_level: 日志级别
     """
+    global _initialized
+    if _initialized:
+        return logger
+
+    print(f"[LoggingConfig] 正在初始化日志系统...")
+
     # 创建日志目录
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
@@ -43,9 +52,9 @@ def setup_logging(
     # 移除默认的 handler
     logger.remove()
 
-    # 添加控制台输出
+    # 添加控制台输出（使用 stdout 以便 PyCharm 能正确显示）
     logger.add(
-        sys.stderr,
+        sys.stdout,
         level=log_level,
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
                "<level>{level: <8}</level> | "
@@ -78,10 +87,14 @@ def setup_logging(
         enqueue=True,
     )
 
+    _initialized = True
     logger.info(f"日志系统初始化完成，环境: {settings.env}, 级别: {log_level}, 目录: {log_dir}")
 
     return logger
 
+
+# 模块加载时自动初始化日志配置
+setup_logging()
 
 # 导出 logger 实例供其他模块使用
 __all__ = ["logger", "setup_logging"]

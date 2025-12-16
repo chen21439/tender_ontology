@@ -10,6 +10,9 @@ import threading
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+from tender_ontology.config.logging_config import logger
+from tender_ontology.utils.text import TextMatcher, normalize_text
+
 
 class FileService:
     """文件处理服务"""
@@ -94,12 +97,12 @@ class FileService:
         if output_dir is None:
             output_dir = file_path.parent
 
-        print(f"[FileService] ========== Start ==========")
-        print(f"[FileService] File: {file_path.name}")
-        print(f"[FileService] Type: {file_type}")
-        print(f"[FileService] Task ID: {task_id}")
-        print(f"[FileService] Async: {async_mode}")
-        print(f"[FileService] ============================")
+        logger.info(f"[FileService] ========== Start ==========")
+        logger.info(f"[FileService] File: {file_path.name}")
+        logger.info(f"[FileService] Type: {file_type}")
+        logger.info(f"[FileService] Task ID: {task_id}")
+        logger.info(f"[FileService] Async: {async_mode}")
+        logger.info(f"[FileService] ============================")
 
         if async_mode:
             # 异步模式：启动后台线程
@@ -163,7 +166,7 @@ class FileService:
 
         使用 Docling 处理器
         """
-        print(f"[FileService] 使用 Docling 处理 PDF...")
+        logger.info(f"[FileService] 使用 Docling 处理 PDF...")
         return self.pdf_handler.process_pdf_sync(
             pdf_path=file_path,
             task_id=task_id,
@@ -187,7 +190,7 @@ class FileService:
         3. 下载结果 ZIP (/artifact/{taskId})
         4. 使用 UnstructuredHeadingExtractor 提取标题
         """
-        print(f"[FileService] 开始处理 DOCX...")
+        logger.info(f"[FileService] 开始处理 DOCX...")
 
         try:
             # 更新状态为"处理中"
@@ -201,7 +204,7 @@ class FileService:
             # 2. Unstructured 提取标题
             import concurrent.futures
 
-            print(f"[FileService] 并行启动: DOCX 转 PDF + Unstructured 提取...")
+            logger.info(f"[FileService] 并行启动: DOCX 转 PDF + Unstructured 提取...")
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
                 # 提交两个任务
@@ -226,11 +229,11 @@ class FileService:
             if pdf_result:
                 artifacts["docx_pdf"] = pdf_result
                 artifacts["pdf_path"] = pdf_result.get("pdf_path", "")
-                print(f"[FileService] DOCX 转 PDF 完成: {pdf_result.get('pdf_path', '')}")
+                logger.info(f"[FileService] DOCX 转 PDF 完成: {pdf_result.get('pdf_path', '')}")
 
                 # 解析位置信息
                 id_to_location = self._parse_location_files(output_dir)
-                print(f"[FileService] 解析位置信息: {len(id_to_location)} 个元素")
+                logger.info(f"[FileService] 解析位置信息: {len(id_to_location)} 个元素")
 
                 # 从 PDF 提取页面高度（用于坐标系转换）
                 pdf_path = Path(pdf_result.get("pdf_path", ""))
@@ -238,14 +241,14 @@ class FileService:
                     page_heights = self._extract_page_heights_from_pdf(pdf_path)
 
             # 处理 Unstructured 结果
-            print(f"[FileService] Unstructured 提取完成")
+            logger.info(f"[FileService] Unstructured 提取完成")
 
             # 回填位置信息到 fulltext.md
             if id_to_location:
                 fulltext_md_path = output_dir / f"{file_path.stem}_unstructured_fulltext.md"
                 if fulltext_md_path.exists():
                     self._backfill_location_to_fulltext(fulltext_md_path, id_to_location)
-                    print(f"[FileService] 位置信息已回填到 fulltext.md")
+                    logger.info(f"[FileService] 位置信息已回填到 fulltext.md")
 
             # 构建返回结果
             artifacts.update({
@@ -289,7 +292,7 @@ class FileService:
             }
 
         except Exception as e:
-            print(f"[FileService] DOCX 处理失败: {e}")
+            logger.error(f"[FileService] DOCX 处理失败: {e}")
             import traceback
             traceback.print_exc()
 
@@ -331,7 +334,7 @@ class FileService:
             # 从配置获取服务地址
             base_url = settings.docx_pdf_service_url
 
-            print(f"[FileService] 调用 DOCX 转 PDF 服务: {base_url}")
+            logger.info(f"[FileService] 调用 DOCX 转 PDF 服务: {base_url}")
 
             client = DocxPdfClient(
                 base_url=base_url,
@@ -340,26 +343,26 @@ class FileService:
             )
 
             # Step 1: 上传并处理
-            print(f"[FileService] Step 1: 上传 DOCX 到 /process...")
+            logger.info(f"[FileService] Step 1: 上传 DOCX 到 /process...")
             process_result = client.process(docx_path, include_mcid=True)
 
             if not process_result.get("success"):
-                print(f"[FileService] /process 失败: {process_result.get('message')}")
+                logger.info(f"[FileService] /process 失败: {process_result.get('message')}")
                 return None
 
             remote_task_id = process_result.get("taskId")
-            print(f"[FileService] /process 成功, taskId: {remote_task_id}")
+            logger.info(f"[FileService] /process 成功, taskId: {remote_task_id}")
 
             # Step 2: 等待任务完成
-            print(f"[FileService] Step 2: 等待任务完成...")
+            logger.info(f"[FileService] Step 2: 等待任务完成...")
             wait_result = client.wait_for_completion(remote_task_id)
 
             if not wait_result.get("success"):
-                print(f"[FileService] 任务未完成: {wait_result.get('message')}")
+                logger.info(f"[FileService] 任务未完成: {wait_result.get('message')}")
                 return None
 
             # Step 3: 下载结果 ZIP
-            print(f"[FileService] Step 3: 下载结果 ZIP...")
+            logger.info(f"[FileService] Step 3: 下载结果 ZIP...")
             zip_path = output_dir / f"{remote_task_id}.zip"
             client.download_artifact(remote_task_id, zip_path)
 
@@ -376,7 +379,7 @@ class FileService:
             }
 
         except Exception as e:
-            print(f"[FileService] DOCX 转 PDF 服务调用失败: {e}")
+            logger.info(f"[FileService] DOCX 转 PDF 服务调用失败: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -416,13 +419,13 @@ class FileService:
                             target_path.unlink()
                         # 重命名
                         extracted_path.rename(target_path)
-                        print(f"[FileService] 解压并重命名: {name} -> {target_pdf_name}")
+                        logger.info(f"[FileService] 解压并重命名: {name} -> {target_pdf_name}")
                         extracted.append(str(target_path))
                     else:
-                        print(f"[FileService] 解压: {name}")
+                        logger.info(f"[FileService] 解压: {name}")
                         extracted.append(str(extracted_path))
         except Exception as e:
-            print(f"[FileService] 解压失败: {e}")
+            logger.info(f"[FileService] 解压失败: {e}")
 
         return extracted
 
@@ -455,21 +458,29 @@ class FileService:
         import glob
 
         try:
-            print(f"[FileService] 开始构建文档树...")
+            logger.info(f"[FileService] 开始构建文档树...")
 
             # 1. 读取 fulltext.md（所有元素，含表格）
             fulltext_path = output_dir / f"{file_stem}_unstructured_fulltext.md"
             if not fulltext_path.exists():
-                print(f"[FileService] 警告: {fulltext_path.name} 不存在，跳过树构建")
+                logger.info(f"[FileService] 警告: {fulltext_path.name} 不存在，跳过树构建")
                 return None
 
             # 解析 fulltext.md 为 items 列表
             fulltext_items = self._parse_fulltext_md(fulltext_path)
-            print(f"[FileService] 读取 fulltext: {len(fulltext_items)} 个元素")
+            logger.info(f"[FileService] 读取 fulltext: {len(fulltext_items)} 个元素")
 
             # 1.5 解析 paragraph.txt 和 table.txt 获取 id -> page/bbox 映射
             id_to_location = self._parse_location_files(output_dir)
-            print(f"[FileService] 读取位置信息: {len(id_to_location)} 个元素")
+            logger.info(f"[FileService] 读取位置信息: {len(id_to_location)} 个元素")
+
+            # 1.6 创建 TextMatcher 用于基于文本内容的位置匹配
+            text_matcher = TextMatcher.from_location_dict(
+                id_to_location,
+                max_edit_distance=3,
+                search_steps=5
+            )
+            logger.info(f"[FileService] TextMatcher 已创建")
 
             # 2. 转换 all_headings 为 model_headings 格式
             # all_headings: [{id, text, level, type?}, ...]
@@ -481,7 +492,7 @@ class FileService:
                     "text": h.get("text", ""),
                     "level": h.get("level", 1)
                 })
-            print(f"[FileService] 标题数: {len(model_headings)}")
+            logger.info(f"[FileService] 标题数: {len(model_headings)}")
 
             # 3. 构建 id -> level 映射 和 id -> heading 映射
             heading_level_map = {h["id"]: h["level"] for h in model_headings}
@@ -492,7 +503,7 @@ class FileService:
             id_to_index = {item["id"]: i for i, item in enumerate(fulltext_items)}
 
             # 5. 按 level 切分，递归构建树（包含段落内容）
-            def build_tree_recursive(items_slice, parent_level=0):
+            def build_tree_recursive(items_slice, parent_level=0, base_index=0):
                 """
                 递归构建树，将段落内容挂载到对应的标题下
 
@@ -504,6 +515,7 @@ class FileService:
                 Args:
                     items_slice: fulltext 的切片（按索引范围）
                     parent_level: 父节点的 level
+                    base_index: 当前切片在原始 fulltext_items 中的起始索引
 
                 Returns:
                     children 列表
@@ -518,11 +530,14 @@ class FileService:
 
                 # 收集当前标题之前的非标题内容
                 pre_heading_items = []
+                pre_heading_indices = []
 
                 for i, item in enumerate(items_slice):
                     item_id = item.get("id", "")
+                    item_text = item.get("text", "")
                     is_heading = item_id in heading_ids
                     item_level = heading_level_map.get(item_id, 999)
+                    global_index = base_index + i  # 在原始列表中的索引
 
                     # 遇到新的标题（level <= parent_level + 1），说明需要处理
                     if is_heading and item_level <= parent_level + 1:
@@ -531,29 +546,37 @@ class FileService:
                             prev_item = items_slice[current_heading_idx]
                             prev_id = prev_item.get("id", "")
                             prev_text = heading_text_map.get(prev_id, prev_item.get("text", ""))
+                            prev_global_index = base_index + current_heading_idx
 
                             # 递归构建子树（包含标题之间的所有内容）
                             sub_items = items_slice[current_children_start:i]
-                            sub_children = build_tree_recursive(sub_items, current_heading_level)
+                            sub_base_index = base_index + current_children_start
+                            sub_children = build_tree_recursive(sub_items, current_heading_level, sub_base_index)
 
                             children.append({
                                 "pid": prev_id,
                                 "title": prev_text,
                                 "content": prev_text,
-                                "location": self._get_location_for_id(prev_id, id_to_location, page_heights),
+                                "location": self._get_location_with_text_match(
+                                    prev_id, prev_text, text_matcher, page_heights, prev_global_index
+                                ),
                                 "children": sub_children if sub_children else None
                             })
                         else:
                             # 第一个标题之前的非标题内容，作为独立节点添加
-                            for pre_item in pre_heading_items:
+                            for pre_idx, pre_item in zip(pre_heading_indices, pre_heading_items):
                                 pre_id = pre_item.get("id", "")
+                                pre_text = pre_item.get("text", "")
                                 children.append({
                                     "pid": pre_id,
                                     "title": "",
-                                    "content": pre_item.get("text", ""),
-                                    "location": self._get_location_for_id(pre_id, id_to_location, page_heights)
+                                    "content": pre_text,
+                                    "location": self._get_location_with_text_match(
+                                        pre_id, pre_text, text_matcher, page_heights, pre_idx
+                                    )
                                 })
                             pre_heading_items = []
+                            pre_heading_indices = []
 
                         # 更新当前标题
                         current_heading_idx = i
@@ -562,32 +585,41 @@ class FileService:
                     elif current_heading_idx is None:
                         # 还没遇到第一个标题，收集非标题内容
                         pre_heading_items.append(item)
+                        pre_heading_indices.append(global_index)
 
                 # 处理最后一个标题
                 if current_heading_idx is not None:
                     prev_item = items_slice[current_heading_idx]
                     prev_id = prev_item.get("id", "")
                     prev_text = heading_text_map.get(prev_id, prev_item.get("text", ""))
+                    prev_global_index = base_index + current_heading_idx
 
                     sub_items = items_slice[current_children_start:]
-                    sub_children = build_tree_recursive(sub_items, current_heading_level)
+                    sub_base_index = base_index + current_children_start
+                    sub_children = build_tree_recursive(sub_items, current_heading_level, sub_base_index)
 
                     children.append({
                         "pid": prev_id,
                         "title": prev_text,
                         "content": prev_text,
-                        "location": self._get_location_for_id(prev_id, id_to_location, page_heights),
+                        "location": self._get_location_with_text_match(
+                            prev_id, prev_text, text_matcher, page_heights, prev_global_index
+                        ),
                         "children": sub_children if sub_children else None
                     })
                 else:
                     # 整个 slice 没有标题，全部作为叶子节点（段落内容）
-                    for item in items_slice:
+                    for i, item in enumerate(items_slice):
                         item_id = item.get("id", "")
+                        item_text = item.get("text", "")
+                        global_index = base_index + i
                         children.append({
                             "pid": item_id,
                             "title": "",
-                            "content": item.get("text", ""),
-                            "location": self._get_location_for_id(item_id, id_to_location, page_heights)
+                            "content": item_text,
+                            "location": self._get_location_with_text_match(
+                                item_id, item_text, text_matcher, page_heights, global_index
+                            )
                         })
 
                 # 移除空的 children
@@ -604,7 +636,7 @@ class FileService:
                 if item_id in heading_ids and heading_level_map.get(item_id) == 1:
                     level1_positions.append(i)
 
-            print(f"[FileService] 一级标题数: {len(level1_positions)}")
+            logger.info(f"[FileService] 一级标题数: {len(level1_positions)}")
 
             # 7. 构建根节点列表
             structured_data = []
@@ -613,13 +645,16 @@ class FileService:
             if level1_positions and level1_positions[0] > 0:
                 # 文档开头有非标题内容，创建一个虚拟根节点
                 pre_items = fulltext_items[:level1_positions[0]]
-                for item in pre_items:
+                for i, item in enumerate(pre_items):
                     item_id = item.get("id", "")
+                    item_text = item.get("text", "")
                     structured_data.append({
                         "pid": item_id,
                         "title": "",
-                        "content": item.get("text", ""),
-                        "location": self._get_location_for_id(item_id, id_to_location, page_heights)
+                        "content": item_text,
+                        "location": self._get_location_with_text_match(
+                            item_id, item_text, text_matcher, page_heights, i
+                        )
                     })
 
             # 处理每个一级标题
@@ -638,24 +673,39 @@ class FileService:
 
                 # 递归构建子树（从第二个元素开始）
                 sub_items = section_items[1:]
-                sub_children = build_tree_recursive(sub_items, 1)
+                sub_base_index = pos + 1  # 子项在原始列表中的起始索引
+                sub_children = build_tree_recursive(sub_items, 1, sub_base_index)
 
                 root_node = {
                     "pid": first_id,
                     "title": first_text,
                     "content": first_text,
-                    "location": self._get_location_for_id(first_id, id_to_location, page_heights)
+                    "location": self._get_location_with_text_match(
+                        first_id, first_text, text_matcher, page_heights, pos
+                    )
                 }
                 if sub_children:
                     root_node["children"] = sub_children
 
                 structured_data.append(root_node)
 
-            print(f"[FileService] 树构建完成，根节点数: {len(structured_data)}")
+            logger.info(f"[FileService] 树构建完成，根节点数: {len(structured_data)}")
+
+            # 打印 TextMatcher 匹配统计
+            match_stats = text_matcher.get_stats()
+            total_matched = match_stats['id'] + match_stats['exact'] + match_stats['fuzzy']
+            logger.info(
+                f"[FileService] TextMatcher 匹配统计: "
+                f"ID匹配 {match_stats['id']}, "
+                f"精确匹配 {match_stats['exact']}, "
+                f"模糊匹配 {match_stats['fuzzy']}, "
+                f"未匹配 {match_stats['no_match']}, "
+                f"总匹配 {total_matched}"
+            )
 
             # 5. 聚合连续的空 title 节点
             structured_data = self._aggregate_empty_title_nodes(structured_data)
-            print(f"[FileService] 空 title 节点聚合完成")
+            logger.info(f"[FileService] 空 title 节点聚合完成")
 
             # 6. 保存 _agent.json
             agent_path = output_dir / f"{file_stem}_agent.json"
@@ -663,7 +713,7 @@ class FileService:
                 json.dumps(structured_data, ensure_ascii=False, indent=2),
                 encoding='utf-8'
             )
-            print(f"[FileService] Agent JSON 已保存: {agent_path.name}")
+            logger.info(f"[FileService] Agent JSON 已保存: {agent_path.name}")
 
             # 6. 调用 extract_onto API
             from tender_ontology.config.settings import settings
@@ -677,8 +727,8 @@ class FileService:
                 "structured_data": structured_data
             }
 
-            print(f"[FileService] 调用 extract_onto API...")
-            print(f"[FileService] URL: {api_url}")
+            logger.info(f"[FileService] 调用 extract_onto API...")
+            logger.info(f"[FileService] URL: {api_url}")
 
             start_time = time.time()
             response = requests.post(
@@ -694,7 +744,7 @@ class FileService:
 
             if response.status_code == 200:
                 api_result = response.json()
-                print(f"[FileService] extract_onto API 调用成功，耗时: {elapsed_time:.2f} 秒")
+                logger.info(f"[FileService] extract_onto API 调用成功，耗时: {elapsed_time:.2f} 秒")
 
                 # 保存响应到 _ontology.json
                 ontology_path = output_dir / f"{file_stem}_ontology.json"
@@ -702,19 +752,19 @@ class FileService:
                     json.dumps(api_result, ensure_ascii=False, indent=2),
                     encoding='utf-8'
                 )
-                print(f"[FileService] Ontology JSON 已保存: {ontology_path.name}")
+                logger.info(f"[FileService] Ontology JSON 已保存: {ontology_path.name}")
                 result["ontology_path"] = str(ontology_path)
             else:
-                print(f"[FileService] extract_onto API 调用失败: HTTP {response.status_code}")
-                print(f"[FileService] 响应: {response.text[:500]}")
+                logger.info(f"[FileService] extract_onto API 调用失败: HTTP {response.status_code}")
+                logger.info(f"[FileService] 响应: {response.text[:500]}")
 
             return result
 
         except requests.Timeout:
-            print(f"[FileService] extract_onto API 请求超时")
+            logger.info(f"[FileService] extract_onto API 请求超时")
             return None
         except Exception as e:
-            print(f"[FileService] 构建文档树或调用 API 失败: {e}")
+            logger.info(f"[FileService] 构建文档树或调用 API 失败: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -903,6 +953,27 @@ class FileService:
 
         return loc_info
 
+    def _normalize_text(self, text: str) -> str:
+        """
+        标准化文本：去除空格和零宽字符
+
+        Args:
+            text: 原始文本
+
+        Returns:
+            标准化后的文本
+        """
+        import re
+        if not text:
+            return ""
+        # 移除所有空白字符（空格、制表符、换行等）
+        result = re.sub(r'\s+', '', text)
+        # 移除零宽字符
+        # U+200B: 零宽空格, U+200C: 零宽非连接符, U+200D: 零宽连接符
+        # U+FEFF: 零宽非断空格(BOM), U+00AD: 软连字符
+        result = re.sub(r'[\u200b\u200c\u200d\ufeff\u00ad\u2060\u180e]', '', result)
+        return result
+
     def _parse_location_files(self, output_dir: Path) -> Dict[str, Dict[str, Any]]:
         """
         解析 paragraph.txt 和 table.txt 获取 id -> page/bbox 映射
@@ -915,14 +986,17 @@ class FileService:
             output_dir: 输出目录
 
         Returns:
-            {id: {"page": "1", "bbox": "x1,y1,x2,y2"}, ...}
+            {id: {"page": "1", "bbox": "x1,y1,x2,y2", "text": "...", "normalized_text": "..."}, ...}
         """
         import re
 
         id_to_location = {}
+        paragraph_count = 0
+        non_empty_paragraph_count = 0
+        table_count = 0
 
-        # 匹配段落: <p id="p001" ... page="1" bbox="...">
-        p_pattern = re.compile(r'<p\s+id="([^"]+)"[^>]*page="([^"]+)"[^>]*bbox="([^"]+)"')
+        # 匹配段落: <p id="p001" ... page="1" bbox="...">文本</p>
+        p_pattern = re.compile(r'<p\s+id="([^"]+)"[^>]*page="([^"]+)"[^>]*bbox="([^"]+)"[^>]*>([^<]*)</p>')
         # 匹配表格: <table id="t001" ... page="1" bbox="...">
         table_pattern = re.compile(r'<table\s+id="([^"]+)"[^>]*page="([^"]+)"[^>]*bbox="([^"]+)"')
 
@@ -932,10 +1006,20 @@ class FileService:
             try:
                 content = pf.read_text(encoding='utf-8')
                 for match in p_pattern.finditer(content):
-                    pid, page, bbox = match.groups()
-                    id_to_location[pid] = {"page": page, "bbox": bbox}
+                    pid, page, bbox, text = match.groups()
+                    normalized_text = self._normalize_text(text)
+                    id_to_location[pid] = {
+                        "page": page,
+                        "bbox": bbox,
+                        "text": text,
+                        "normalized_text": normalized_text
+                    }
+                    paragraph_count += 1
+                    # 统计非空文本段落
+                    if text.strip():
+                        non_empty_paragraph_count += 1
             except Exception as e:
-                print(f"[FileService] 解析 paragraph.txt 失败: {e}")
+                logger.info(f"[FileService] 解析 paragraph.txt 失败: {e}")
 
         # 解析 table.txt (只取表格级别的 id，如 t001)
         table_files = list(output_dir.glob("*_table.txt"))
@@ -945,10 +1029,156 @@ class FileService:
                 for match in table_pattern.finditer(content):
                     tid, page, bbox = match.groups()
                     id_to_location[tid] = {"page": page, "bbox": bbox}
+                    table_count += 1
             except Exception as e:
-                print(f"[FileService] 解析 table.txt 失败: {e}")
+                logger.info(f"[FileService] 解析 table.txt 失败: {e}")
+
+        # 打印统计信息
+        logger.info(f"[FileService] ZIP 位置信息: {paragraph_count} 个段落 (非空: {non_empty_paragraph_count}), {table_count} 个表格")
 
         return id_to_location
+
+    def _build_text_location_index(self, id_to_location: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+        """
+        构建标准化文本到 pid 的索引
+
+        Args:
+            id_to_location: id -> location 映射
+
+        Returns:
+            normalized_text -> pid 映射
+        """
+        text_to_pid = {}
+        for pid, loc_info in id_to_location.items():
+            if pid.startswith("p"):  # 只处理段落，不处理表格
+                normalized_text = loc_info.get("normalized_text", "")
+                if normalized_text:
+                    text_to_pid[normalized_text] = pid
+        return text_to_pid
+
+    def _get_pid_list(self, id_to_location: Dict[str, Dict[str, Any]]) -> list:
+        """
+        获取按顺序排列的段落 pid 列表
+
+        Args:
+            id_to_location: id -> location 映射
+
+        Returns:
+            排序后的 pid 列表
+        """
+        pids = [pid for pid in id_to_location.keys() if pid.startswith("p")]
+        # 按数字排序: p001, p002, ...
+        pids.sort(key=lambda x: int(x[1:]) if x[1:].isdigit() else 0)
+        return pids
+
+    def _edit_distance(self, s1: str, s2: str, max_distance: int = 3) -> int:
+        """
+        计算两个字符串的编辑距离（Levenshtein 距离）
+
+        带有早期终止优化：如果距离超过 max_distance，立即返回 max_distance + 1
+
+        Args:
+            s1: 字符串1
+            s2: 字符串2
+            max_distance: 最大距离阈值
+
+        Returns:
+            编辑距离，如果超过 max_distance 返回 max_distance + 1
+        """
+        if abs(len(s1) - len(s2)) > max_distance:
+            return max_distance + 1
+
+        if len(s1) > len(s2):
+            s1, s2 = s2, s1
+
+        if len(s1) == 0:
+            return len(s2) if len(s2) <= max_distance else max_distance + 1
+
+        previous_row = list(range(len(s1) + 1))
+
+        for i, c2 in enumerate(s2):
+            current_row = [i + 1]
+            min_in_row = i + 1
+
+            for j, c1 in enumerate(s1):
+                insertions = previous_row[j + 1] + 1
+                deletions = current_row[j] + 1
+                substitutions = previous_row[j] + (c1 != c2)
+                cell = min(insertions, deletions, substitutions)
+                current_row.append(cell)
+                min_in_row = min(min_in_row, cell)
+
+            # 早期终止
+            if min_in_row > max_distance:
+                return max_distance + 1
+
+            previous_row = current_row
+
+        return previous_row[-1] if previous_row[-1] <= max_distance else max_distance + 1
+
+    def _find_location_by_text(
+        self,
+        item_text: str,
+        id_to_location: Dict[str, Dict[str, Any]],
+        text_to_pid: Dict[str, str],
+        pid_list: list,
+        current_index_hint: int = -1,
+        max_edit_distance: int = 3,
+        search_steps: int = 5
+    ) -> Optional[str]:
+        """
+        通过文本内容查找对应的 pid
+
+        查找策略：
+        1. 首先精确匹配标准化文本
+        2. 如果找不到，从 current_index_hint 向两侧查找编辑距离在 max_edit_distance 以内的段落
+
+        Args:
+            item_text: 要查找的文本
+            id_to_location: id -> location 映射
+            text_to_pid: normalized_text -> pid 映射
+            pid_list: 按顺序排列的 pid 列表
+            current_index_hint: 当前位置提示（用于确定搜索范围）
+            max_edit_distance: 最大编辑距离
+            search_steps: 两侧各搜索的步数
+
+        Returns:
+            匹配到的 pid，如果没找到返回 None
+        """
+        normalized_text = self._normalize_text(item_text)
+        if not normalized_text:
+            return None
+
+        # 1. 精确匹配
+        if normalized_text in text_to_pid:
+            return text_to_pid[normalized_text]
+
+        # 2. 模糊匹配：从 current_index_hint 向两侧搜索
+        if current_index_hint < 0 or not pid_list:
+            return None
+
+        # 确定搜索范围
+        start_left = max(0, current_index_hint - search_steps)
+        end_right = min(len(pid_list), current_index_hint + search_steps + 1)
+
+        best_match = None
+        best_distance = max_edit_distance + 1
+
+        # 向两侧搜索
+        for i in range(start_left, end_right):
+            pid = pid_list[i]
+            loc_info = id_to_location.get(pid, {})
+            candidate_text = loc_info.get("normalized_text", "")
+
+            if not candidate_text:
+                continue
+
+            distance = self._edit_distance(normalized_text, candidate_text, max_edit_distance)
+            if distance <= max_edit_distance and distance < best_distance:
+                best_distance = distance
+                best_match = pid
+
+        return best_match
 
     def _extract_page_heights_from_pdf(self, pdf_path: Path) -> Dict[int, float]:
         """
@@ -973,12 +1203,12 @@ class FileService:
                 page_heights[page_idx + 1] = rect.height
             doc.close()
 
-            print(f"[FileService] 提取 PDF 页面高度: {len(page_heights)} 页")
+            logger.info(f"[FileService] 提取 PDF 页面高度: {len(page_heights)} 页")
 
         except ImportError:
-            print(f"[FileService] 警告: pymupdf 未安装，无法提取页面高度")
+            logger.info(f"[FileService] 警告: pymupdf 未安装，无法提取页面高度")
         except Exception as e:
-            print(f"[FileService] 提取页面高度失败: {e}")
+            logger.info(f"[FileService] 提取页面高度失败: {e}")
 
         return page_heights
 
@@ -1084,6 +1314,90 @@ class FileService:
 
         return locations
 
+    def _get_location_with_text_match(
+        self,
+        item_id: str,
+        item_text: str,
+        text_matcher: TextMatcher,
+        page_heights: Optional[Dict[int, float]] = None,
+        current_index: int = -1
+    ) -> list:
+        """
+        使用 TextMatcher 根据 ID 和文本内容获取位置信息
+
+        查找策略：
+        1. 首先通过 ID 匹配
+        2. 如果 ID 匹配失败，通过文本精确匹配
+        3. 如果精确匹配失败，通过模糊匹配（编辑距离）
+
+        Args:
+            item_id: 元素 ID (如 P_00001, t001)
+            item_text: 元素文本内容
+            text_matcher: TextMatcher 实例
+            page_heights: 页码 -> 页面高度映射
+            current_index: 当前索引（用于模糊匹配范围）
+
+        Returns:
+            location 列表
+        """
+        # 使用 TextMatcher 查找匹配
+        matched_pid, loc_info = text_matcher.find_match(
+            text=item_text,
+            item_id=item_id,
+            current_index=current_index
+        )
+
+        if not matched_pid or not loc_info:
+            return []
+
+        # 获取位置信息并转换坐标系
+        page_str = loc_info.get("page", "")
+        bbox_str = loc_info.get("bbox", "")
+
+        if not page_str or not bbox_str:
+            return []
+
+        # 处理跨页情况: page="1|2" bbox="x0,y0,x1,y1|x0,y0,x1,y1"
+        pages = page_str.split("|")
+        bboxes = bbox_str.split("|")
+
+        locations = []
+        for i, page in enumerate(pages):
+            try:
+                page_num = int(page)
+                bbox_coords = [float(x) for x in bboxes[i].split(",")] if i < len(bboxes) else []
+
+                if len(bbox_coords) >= 4:
+                    x0, y0, x1, y1 = bbox_coords[0], bbox_coords[1], bbox_coords[2], bbox_coords[3]
+
+                    page_height = page_heights.get(page_num) if page_heights else None
+
+                    if page_height:
+                        new_t = round(page_height - y1, 4)
+                        new_b = round(page_height - y0, 4)
+
+                        locations.append({
+                            "page": page_num,
+                            "l": round(x0, 4),
+                            "t": new_t,
+                            "r": round(x1, 4),
+                            "b": new_b,
+                            "coord_origin": "TOPLEFT"
+                        })
+                    else:
+                        locations.append({
+                            "page": page_num,
+                            "l": round(x0, 4),
+                            "t": round(y1, 4),
+                            "r": round(x1, 4),
+                            "b": round(y0, 4),
+                            "coord_origin": "BOTTOMLEFT"
+                        })
+            except (ValueError, IndexError):
+                continue
+
+        return locations
+
     def _parse_fulltext_md(self, fulltext_path: Path) -> list:
         """
         解析 fulltext.md 文件为 items 列表
@@ -1091,7 +1405,7 @@ class FileService:
         fulltext.md 格式:
         - # [category] 标题文本 {id=P_00001, ...}  -> 标题候选项
         - - [category] 段落文本 {id=P_00002, ...}  -> 普通段落
-        - [Table] t001-r000-c000-p000             -> 表格
+        - [Table] t001                            -> 表格
           <table>...</table>
 
         Args:
@@ -1209,7 +1523,7 @@ class FileService:
             if is_local_mode():
                 storage = get_local_storage()
                 storage.update_task_status(task_id, status, message)
-                print(f"[FileService] Task {task_id} status updated to {status} (local)")
+                logger.info(f"[FileService] Task {task_id} status updated to {status} (local)")
             else:
                 from tender_ontology.utils.db.mysql import get_db
                 from tender_ontology.utils.db.mysql.models import ComplianceFileTask
@@ -1225,10 +1539,10 @@ class FileService:
                         task.review_status = status
                         task.update_time = datetime.now()
                         session.commit()
-                        print(f"[FileService] Task {task_id} status updated to {status} (mysql)")
+                        logger.info(f"[FileService] Task {task_id} status updated to {status} (mysql)")
 
         except Exception as e:
-            print(f"[FileService] Failed to update task status: {e}")
+            logger.info(f"[FileService] Failed to update task status: {e}")
             import traceback
             traceback.print_exc()
 
@@ -1266,7 +1580,7 @@ if __name__ == "__main__":
     task_id = sys.argv[2] if len(sys.argv) > 2 else file_path.parent.name
 
     print(f"{'=' * 60}")
-    print(f"[FileService] 文件处理测试")
+    logger.info(f"[FileService] 文件处理测试")
     print(f"{'=' * 60}")
     print(f"文件: {file_path}")
     print(f"任务 ID: {task_id}")
