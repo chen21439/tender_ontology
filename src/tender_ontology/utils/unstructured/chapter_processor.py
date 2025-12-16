@@ -62,19 +62,21 @@ class ChapterProcessor:
         omitted = len(text) - 10
         return f"{text[:5]}...省略{omitted}字...{text[-5:]}"
 
-    def _extract_candidates_from_content(self, content: str) -> List[Dict[str, Any]]:
+    def _extract_candidates_from_content(self, content: str, context_chars: int = 5) -> List[Dict[str, Any]]:
         """
-        从 markdown 内容中提取章节内容（标题完整发送，正文缩略）
+        从 markdown 内容中提取章节内容（标题完整发送，正文缩略，附带上下文）
 
         Args:
             content: markdown 格式的章节内容
+            context_chars: 上下文字符数（默认5个字符）
 
         Returns:
-            候选内容列表，每个元素包含 id, text, is_heading
+            候选内容列表，每个元素包含 id, text, is_heading, pre_para, next_para
         """
-        candidates = []
         id_pattern = re.compile(r'\{id=([^},]+)')
 
+        # 第一遍：解析所有行，保存完整信息
+        all_items = []
         for line in content.split('\n'):
             line = line.strip()
             if not line:
@@ -107,23 +109,40 @@ class ChapterProcessor:
             text = text.strip()
 
             if text and item_id:
-                # 标题完整发送，正文大于20字符直接跳过
-                if is_heading:
-                    candidates.append({
-                        "id": item_id,
-                        "text": text,
-                        "display_text": text,
-                        "is_heading": True
-                    })
-                elif len(text) < 20:
-                    # 只保留短段落（可能是遗漏的标题）
-                    candidates.append({
-                        "id": item_id,
-                        "text": text,
-                        "display_text": text,
-                        "is_heading": False
-                    })
-                # 长段落直接跳过，不发送给模型
+                all_items.append({
+                    "id": item_id,
+                    "text": text,
+                    "is_heading": is_heading
+                })
+
+        # 第二遍：筛选候选项并添加上下文
+        candidates = []
+        for i, item in enumerate(all_items):
+            text = item["text"]
+            is_heading = item["is_heading"]
+
+            # 标题候选 或 短段落（<20字）
+            if is_heading or len(text) < 20:
+                # 获取前一个段落的前N个字符（不加省略号）
+                pre_para = ""
+                if i > 0:
+                    prev_text = all_items[i - 1]["text"]
+                    pre_para = prev_text[:context_chars]
+
+                # 获取后一个段落的前N个字符（不加省略号）
+                next_para = ""
+                if i < len(all_items) - 1:
+                    next_text = all_items[i + 1]["text"]
+                    next_para = next_text[:context_chars]
+
+                candidates.append({
+                    "id": item["id"],
+                    "text": text,
+                    "display_text": text,
+                    "is_heading": is_heading,
+                    "pre_para": pre_para,
+                    "next_para": next_para
+                })
 
         return candidates
 
@@ -305,7 +324,7 @@ class ChapterProcessor:
             # 从章节内容中提取候选标题，构建 markdown 格式
             candidates = self._extract_candidates_from_content(chapter['content'])
 
-            # 构建 markdown 格式
+            # 构建 markdown 格式（附带上下文信息）
             markdown_lines = []
             heading_count = 0
             paragraph_count = 0
@@ -313,12 +332,21 @@ class ChapterProcessor:
                 item_id = item.get("id", "")
                 display_text = item.get("display_text", item.get("text", ""))
                 is_heading = item.get("is_heading", False)
+                pre_para = item.get("pre_para", "")
+                next_para = item.get("next_para", "")
+
+                # 构建属性字符串：{id=xxx, prePara=..., nextPara=...}
+                attrs = f"id={item_id}"
+                if pre_para:
+                    attrs += f", prePara={pre_para}"
+                if next_para:
+                    attrs += f", nextPara={next_para}"
 
                 if is_heading:
-                    markdown_lines.append(f"# {display_text} {{id={item_id}}}")
+                    markdown_lines.append(f"# {display_text} {{{attrs}}}")
                     heading_count += 1
                 else:
-                    markdown_lines.append(f"- {display_text} {{id={item_id}}}")
+                    markdown_lines.append(f"- {display_text} {{{attrs}}}")
                     paragraph_count += 1
             markdown_content = "\n".join(markdown_lines)
 

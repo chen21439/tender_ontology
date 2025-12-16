@@ -6,7 +6,7 @@
 - DOCX: 使用 Unstructured 处理 (UnstructuredHeadingExtractor)
 """
 
-import threading
+import multiprocessing
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -105,19 +105,19 @@ class FileService:
         logger.info(f"[FileService] ============================")
 
         if async_mode:
-            # 异步模式：启动后台线程
-            thread = threading.Thread(
-                target=self._process_file_sync,
+            # 异步模式：启动独立子进程（不受主进程热更新影响）
+            process = multiprocessing.Process(
+                target=_process_file_in_subprocess,
                 args=(file_path, file_type, task_id, db_task_id, output_dir),
                 daemon=False
             )
-            thread.start()
+            process.start()
 
             return {
                 "success": True,
                 "task_id": task_id,
                 "file_type": file_type,
-                "message": f"{file_type.upper()} 后台处理已启动"
+                "message": f"{file_type.upper()} 后台处理已启动 (PID: {process.pid})"
             }
         else:
             # 同步模式：直接处理
@@ -242,13 +242,6 @@ class FileService:
 
             # 处理 Unstructured 结果
             logger.info(f"[FileService] Unstructured 提取完成")
-
-            # 回填位置信息到 fulltext.md
-            if id_to_location:
-                fulltext_md_path = output_dir / f"{file_path.stem}_unstructured_fulltext.md"
-                if fulltext_md_path.exists():
-                    self._backfill_location_to_fulltext(fulltext_md_path, id_to_location)
-                    logger.info(f"[FileService] 位置信息已回填到 fulltext.md")
 
             # 构建返回结果
             artifacts.update({
@@ -558,7 +551,7 @@ class FileService:
                                 "title": prev_text,
                                 "content": prev_text,
                                 "location": self._get_location_with_text_match(
-                                    prev_id, prev_text, text_matcher, page_heights, prev_global_index
+                                    prev_text, text_matcher, page_heights, prev_global_index
                                 ),
                                 "children": sub_children if sub_children else None
                             })
@@ -572,7 +565,7 @@ class FileService:
                                     "title": "",
                                     "content": pre_text,
                                     "location": self._get_location_with_text_match(
-                                        pre_id, pre_text, text_matcher, page_heights, pre_idx
+                                        pre_text, text_matcher, page_heights, pre_idx
                                     )
                                 })
                             pre_heading_items = []
@@ -603,7 +596,7 @@ class FileService:
                         "title": prev_text,
                         "content": prev_text,
                         "location": self._get_location_with_text_match(
-                            prev_id, prev_text, text_matcher, page_heights, prev_global_index
+                            prev_text, text_matcher, page_heights, prev_global_index
                         ),
                         "children": sub_children if sub_children else None
                     })
@@ -618,7 +611,7 @@ class FileService:
                             "title": "",
                             "content": item_text,
                             "location": self._get_location_with_text_match(
-                                item_id, item_text, text_matcher, page_heights, global_index
+                                item_text, text_matcher, page_heights, global_index
                             )
                         })
 
@@ -653,7 +646,7 @@ class FileService:
                         "title": "",
                         "content": item_text,
                         "location": self._get_location_with_text_match(
-                            item_id, item_text, text_matcher, page_heights, i
+                            item_text, text_matcher, page_heights, i
                         )
                     })
 
@@ -681,7 +674,7 @@ class FileService:
                     "title": first_text,
                     "content": first_text,
                     "location": self._get_location_with_text_match(
-                        first_id, first_text, text_matcher, page_heights, pos
+                        first_text, text_matcher, page_heights, pos
                     )
                 }
                 if sub_children:
@@ -693,10 +686,9 @@ class FileService:
 
             # 打印 TextMatcher 匹配统计
             match_stats = text_matcher.get_stats()
-            total_matched = match_stats['id'] + match_stats['exact'] + match_stats['fuzzy']
+            total_matched = match_stats['exact'] + match_stats['fuzzy']
             logger.info(
                 f"[FileService] TextMatcher 匹配统计: "
-                f"ID匹配 {match_stats['id']}, "
                 f"精确匹配 {match_stats['exact']}, "
                 f"模糊匹配 {match_stats['fuzzy']}, "
                 f"未匹配 {match_stats['no_match']}, "
@@ -816,12 +808,13 @@ class FileService:
 
         for child in children:
             is_empty_title = child.get("title", "") == ""
+            has_table = "<table" in child.get("content", "").lower()
 
-            if is_empty_title:
-                # 空 title，加入待聚合组
+            if is_empty_title and not has_table:
+                # 空 title 且不含表格，加入待聚合组
                 pending_group.append(child)
             else:
-                # 非空 title，先处理待聚合组
+                # 非空 title 或 含表格，先处理待聚合组
                 if pending_group:
                     aggregated = self._merge_nodes(pending_group)
                     result.append(aggregated)
@@ -874,85 +867,6 @@ class FileService:
             "location": merged_location
         }
 
-    def _backfill_location_to_fulltext(
-        self,
-        fulltext_path: Path,
-        id_to_location: Dict[str, Dict[str, Any]]
-    ):
-        """
-        将位置信息回填到 fulltext.md 文件中
-
-        原格式: # [Title] 文本 {id=P_00001}
-        回填后: # [Title] 文本 {id=P_00001, page=1, bbox=90.9,200.5,514.4,210.5}
-
-        Args:
-            fulltext_path: fulltext.md 文件路径
-            id_to_location: id -> page/bbox 映射
-        """
-        import re
-
-        content = fulltext_path.read_text(encoding='utf-8')
-        lines = content.split('\n')
-        updated_lines = []
-
-        # 匹配 {id=xxx} 或 {id=xxx, ...}
-        id_pattern = re.compile(r'\{id=([^},]+)([^}]*)\}')
-
-        for line in lines:
-            # 查找 {id=xxx} 模式
-            match = id_pattern.search(line)
-            if match:
-                item_id = match.group(1)
-                existing_attrs = match.group(2)  # 可能有其他属性
-
-                # 获取位置信息
-                loc_info = self._get_raw_location_for_id(item_id, id_to_location)
-
-                if loc_info:
-                    page = loc_info.get("page", "")
-                    bbox = loc_info.get("bbox", "")
-
-                    # 构建新的属性字符串
-                    new_attrs = f"id={item_id}, page={page}, bbox={bbox}"
-                    new_tag = "{" + new_attrs + "}"
-
-                    # 替换原来的 {id=xxx...}
-                    line = id_pattern.sub(new_tag, line)
-
-            updated_lines.append(line)
-
-        # 写回文件
-        fulltext_path.write_text('\n'.join(updated_lines), encoding='utf-8')
-
-    def _get_raw_location_for_id(
-        self,
-        item_id: str,
-        id_to_location: Dict[str, Dict[str, Any]]
-    ) -> Optional[Dict[str, str]]:
-        """
-        根据 id 获取原始位置信息（不转换格式）
-
-        Args:
-            item_id: 元素 ID (如 P_00001, t001)
-            id_to_location: id -> page/bbox 映射
-
-        Returns:
-            {"page": "1", "bbox": "x1,y1,x2,y2"} 或 None
-        """
-        # 尝试直接匹配
-        loc_info = id_to_location.get(item_id)
-
-        # 如果是 P_00001 格式，尝试转换为 p001 格式
-        if not loc_info and item_id.startswith("P_"):
-            try:
-                num = int(item_id.replace("P_", ""))
-                alt_id = f"p{num:03d}"
-                loc_info = id_to_location.get(alt_id)
-            except ValueError:
-                pass
-
-        return loc_info
-
     def _normalize_text(self, text: str) -> str:
         """
         标准化文本：去除空格和零宽字符
@@ -995,8 +909,10 @@ class FileService:
         non_empty_paragraph_count = 0
         table_count = 0
 
-        # 匹配段落: <p id="p001" ... page="1" bbox="...">文本</p>
-        p_pattern = re.compile(r'<p\s+id="([^"]+)"[^>]*page="([^"]+)"[^>]*bbox="([^"]+)"[^>]*>([^<]*)</p>')
+        # 匹配段落: <p id="p001" ... page="1" [bbox="..."]>文本</p>
+        # bbox 可选，因为 type="LI" 的列表项可能没有 bbox
+        p_pattern = re.compile(r'<p\s+id="([^"]+)"[^>]*page="([^"]+)"[^>]*>([^<]*)</p>')
+        bbox_pattern = re.compile(r'bbox="([^"]+)"')
         # 匹配表格: <table id="t001" ... page="1" bbox="...">
         table_pattern = re.compile(r'<table\s+id="([^"]+)"[^>]*page="([^"]+)"[^>]*bbox="([^"]+)"')
 
@@ -1005,19 +921,26 @@ class FileService:
         for pf in paragraph_files:
             try:
                 content = pf.read_text(encoding='utf-8')
-                for match in p_pattern.finditer(content):
-                    pid, page, bbox, text = match.groups()
-                    normalized_text = self._normalize_text(text)
-                    id_to_location[pid] = {
-                        "page": page,
-                        "bbox": bbox,
-                        "text": text,
-                        "normalized_text": normalized_text
-                    }
-                    paragraph_count += 1
-                    # 统计非空文本段落
-                    if text.strip():
-                        non_empty_paragraph_count += 1
+                # 逐行解析，分别提取 id, page, bbox(可选), text
+                for line in content.split('\n'):
+                    match = p_pattern.search(line)
+                    if match:
+                        pid, page, text = match.groups()
+                        # 单独提取 bbox（可选）
+                        bbox_match = bbox_pattern.search(line)
+                        bbox = bbox_match.group(1) if bbox_match else ""
+
+                        normalized_text = self._normalize_text(text)
+                        id_to_location[pid] = {
+                            "page": page,
+                            "bbox": bbox,
+                            "text": text,
+                            "normalized_text": normalized_text
+                        }
+                        paragraph_count += 1
+                        # 统计非空文本段落
+                        if text.strip():
+                            non_empty_paragraph_count += 1
             except Exception as e:
                 logger.info(f"[FileService] 解析 paragraph.txt 失败: {e}")
 
@@ -1316,22 +1239,19 @@ class FileService:
 
     def _get_location_with_text_match(
         self,
-        item_id: str,
         item_text: str,
         text_matcher: TextMatcher,
         page_heights: Optional[Dict[int, float]] = None,
         current_index: int = -1
     ) -> list:
         """
-        使用 TextMatcher 根据 ID 和文本内容获取位置信息
+        使用 TextMatcher 根据文本内容获取位置信息
 
         查找策略：
-        1. 首先通过 ID 匹配
-        2. 如果 ID 匹配失败，通过文本精确匹配
-        3. 如果精确匹配失败，通过模糊匹配（编辑距离）
+        1. 精确匹配：标准化文本完全相同
+        2. 模糊匹配：从当前位置向两侧搜索（编辑距离）
 
         Args:
-            item_id: 元素 ID (如 P_00001, t001)
             item_text: 元素文本内容
             text_matcher: TextMatcher 实例
             page_heights: 页码 -> 页面高度映射
@@ -1343,7 +1263,6 @@ class FileService:
         # 使用 TextMatcher 查找匹配
         matched_pid, loc_info = text_matcher.find_match(
             text=item_text,
-            item_id=item_id,
             current_index=current_index
         )
 
@@ -1549,6 +1468,31 @@ class FileService:
 
 # 全局服务实例
 _file_service = None
+
+
+def _process_file_in_subprocess(
+    file_path: Path,
+    file_type: str,
+    task_id: str,
+    db_task_id: Optional[int],
+    output_dir: Path
+):
+    """
+    子进程入口函数
+
+    multiprocessing.Process 不能直接调用实例方法，所以需要这个模块级函数。
+    子进程独立于主进程，主进程热更新不影响已启动的子进程。
+
+    Args:
+        file_path: 文件路径
+        file_type: 文件类型
+        task_id: 任务 ID
+        db_task_id: 数据库任务 ID
+        output_dir: 输出目录
+    """
+    # 在子进程中创建新的服务实例
+    service = FileService()
+    service._process_file_sync(file_path, file_type, task_id, db_task_id, output_dir)
 
 
 def get_file_service() -> FileService:
