@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 from tender_ontology.config.logging_config import logger
-from tender_ontology.utils.text import TextMatcher, normalize_text
+from tender_ontology.utils.text import TextMatcher, TableMatcher, normalize_text
 
 
 class FileService:
@@ -20,10 +20,18 @@ class FileService:
     # 支持的文件类型
     SUPPORTED_EXTENSIONS = {".pdf", ".docx"}
 
-    def __init__(self):
-        """初始化文件服务"""
+    def __init__(self, enable_docx_stage2: bool = False):
+        """
+        初始化文件服务
+
+        Args:
+            enable_docx_stage2: 是否启用 DOCX 二阶段并发处理和树构建（默认关闭）
+                               关闭后：只使用一阶段 level12_headings，不构建树
+                               开启后：执行二阶段章节并发处理 + 树构建
+        """
         self._pdf_handler = None
         self._docx_extractor = None
+        self.enable_docx_stage2 = enable_docx_stage2
 
     @property
     def pdf_handler(self):
@@ -41,7 +49,8 @@ class FileService:
             self._docx_extractor = UnstructuredHeadingExtractor(
                 verbose=True,
                 inspect_elements=3,
-                enable_secondary_validation=True
+                enable_secondary_validation=True,
+                enable_stage2=self.enable_docx_stage2
             )
         return self._docx_extractor
 
@@ -475,6 +484,57 @@ class FileService:
             )
             logger.info(f"[FileService] TextMatcher 已创建")
 
+            # 1.7 创建 TableMatcher 用于表格的位置匹配
+            table_matcher = TableMatcher.from_location_dict(id_to_location)
+            logger.info(f"[FileService] TableMatcher 已创建，表格数: {table_matcher.get_stats()['total_tables']}")
+
+            # 1.8 创建统一的位置获取函数
+            def get_location_for_item(item: dict, current_index: int = -1) -> list:
+                """
+                根据元素类型获取位置信息
+
+                对于表格 (category=="Table" 或 id 以 "t" 开头)：使用 TableMatcher
+                对于 is_toc=True 的元素：使用包含匹配
+                对于其他元素：使用 TextMatcher
+
+                Args:
+                    item: 元素 dict，包含 id, text, category, is_toc
+                    current_index: 当前索引（已弃用，改用 ID 中的数字）
+
+                Returns:
+                    location 列表
+                """
+                item_id = item.get("id", "")
+                item_category = item.get("category", "")
+                item_text = item.get("text", "")
+                is_toc = item.get("is_toc", False)
+
+                # 判断是否为表格
+                is_table = item_category == "Table" or item_id.startswith("t")
+
+                if is_table:
+                    return self._get_location_for_table(item_id, table_matcher, page_heights)
+                elif is_toc:
+                    # is_toc=True 的元素使用包含匹配
+                    # 从 ID 中提取数字作为索引
+                    id_index = -1
+                    if item_id.startswith("P_"):
+                        try:
+                            id_index = int(item_id.replace("P_", ""))
+                        except ValueError:
+                            pass
+                    return self._get_location_for_toc(item_text, id_to_location, page_heights, id_index)
+                else:
+                    # 从 ID 中提取数字作为索引（P_00051 -> 51）
+                    # 这样可以正确对应 paragraph.txt 中的 p051
+                    id_index = -1
+                    if item_id.startswith("P_"):
+                        try:
+                            id_index = int(item_id.replace("P_", ""))
+                        except ValueError:
+                            pass
+                    return self._get_location_with_text_match(item_text, text_matcher, page_heights, id_index)
+
             # 2. 转换 all_headings 为 model_headings 格式
             # all_headings: [{id, text, level, type?}, ...]
             # model_headings 需要: [{id, text, level}, ...]
@@ -550,9 +610,7 @@ class FileService:
                                 "pid": prev_id,
                                 "title": prev_text,
                                 "content": prev_text,
-                                "location": self._get_location_with_text_match(
-                                    prev_text, text_matcher, page_heights, prev_global_index
-                                ),
+                                "location": get_location_for_item(prev_item, prev_global_index),
                                 "children": sub_children if sub_children else None
                             })
                         else:
@@ -564,9 +622,7 @@ class FileService:
                                     "pid": pre_id,
                                     "title": "",
                                     "content": pre_text,
-                                    "location": self._get_location_with_text_match(
-                                        pre_text, text_matcher, page_heights, pre_idx
-                                    )
+                                    "location": get_location_for_item(pre_item, pre_idx)
                                 })
                             pre_heading_items = []
                             pre_heading_indices = []
@@ -595,9 +651,7 @@ class FileService:
                         "pid": prev_id,
                         "title": prev_text,
                         "content": prev_text,
-                        "location": self._get_location_with_text_match(
-                            prev_text, text_matcher, page_heights, prev_global_index
-                        ),
+                        "location": get_location_for_item(prev_item, prev_global_index),
                         "children": sub_children if sub_children else None
                     })
                 else:
@@ -610,9 +664,7 @@ class FileService:
                             "pid": item_id,
                             "title": "",
                             "content": item_text,
-                            "location": self._get_location_with_text_match(
-                                item_text, text_matcher, page_heights, global_index
-                            )
+                            "location": get_location_for_item(item, global_index)
                         })
 
                 # 移除空的 children
@@ -645,9 +697,7 @@ class FileService:
                         "pid": item_id,
                         "title": "",
                         "content": item_text,
-                        "location": self._get_location_with_text_match(
-                            item_text, text_matcher, page_heights, i
-                        )
+                        "location": get_location_for_item(item, i)
                     })
 
             # 处理每个一级标题
@@ -673,9 +723,7 @@ class FileService:
                     "pid": first_id,
                     "title": first_text,
                     "content": first_text,
-                    "location": self._get_location_with_text_match(
-                        first_text, text_matcher, page_heights, pos
-                    )
+                    "location": get_location_for_item(first_item, pos)
                 }
                 if sub_children:
                     root_node["children"] = sub_children
@@ -695,9 +743,18 @@ class FileService:
                 f"总匹配 {total_matched}"
             )
 
-            # 5. 聚合连续的空 title 节点
-            structured_data = self._aggregate_empty_title_nodes(structured_data)
-            logger.info(f"[FileService] 空 title 节点聚合完成")
+            # 打印 TableMatcher 匹配统计
+            table_stats = table_matcher.get_stats()
+            logger.info(
+                f"[FileService] TableMatcher 匹配统计: "
+                f"表格匹配 {table_stats['match']}, "
+                f"未匹配 {table_stats['no_match']}, "
+                f"总表格数 {table_stats['total_tables']}"
+            )
+
+            # 5. 为连续的空 title 节点添加 connect_id 标识
+            structured_data = self._mark_connected_empty_title_nodes(structured_data)
+            logger.info(f"[FileService] 空 title 节点 connect_id 标记完成")
 
             # 6. 保存 _agent.json
             agent_path = output_dir / f"{file_stem}_agent.json"
@@ -761,111 +818,78 @@ class FileService:
             traceback.print_exc()
             return None
 
-    def _aggregate_empty_title_nodes(self, nodes: list) -> list:
+    def _mark_connected_empty_title_nodes(self, nodes: list, connect_id_counter: list = None) -> list:
         """
-        聚合连续的空 title 节点
+        为连续的空 title 节点添加相同的 connect_id 字段
 
-        将 children 中连续的 title="" 的元素合并成一个：
-        - pid: 改成数组，包含所有被合并元素的 pid
-        - content: 用 \\n 拼接
-        - location: 合并所有 location 数组元素
+        不合并节点，保持元素独立，只通过 connect_id 标识关联关系。
+        连续的 title="" 且不含表格的节点会被分配相同的 connect_id。
 
         Args:
             nodes: 节点列表
+            connect_id_counter: 计数器 [当前ID]，用于生成唯一 connect_id
 
         Returns:
-            聚合后的节点列表
+            标记后的节点列表（元素保持独立）
         """
         if not nodes:
             return nodes
 
-        result = []
+        if connect_id_counter is None:
+            connect_id_counter = [0]
 
         for node in nodes:
             # 递归处理 children
             if "children" in node and node["children"]:
-                node["children"] = self._aggregate_children_empty_title(node["children"])
+                node["children"] = self._mark_children_connected(node["children"], connect_id_counter)
 
-            result.append(node)
+        return nodes
 
-        return result
-
-    def _aggregate_children_empty_title(self, children: list) -> list:
+    def _mark_children_connected(self, children: list, connect_id_counter: list) -> list:
         """
-        聚合 children 数组中连续的空 title 节点
+        为 children 数组中连续的空 title 节点添加 connect_id
 
         Args:
             children: 子节点列表
+            connect_id_counter: 计数器 [当前ID]
 
         Returns:
-            聚合后的子节点列表
+            标记后的子节点列表
         """
         if not children:
             return children
 
-        result = []
-        pending_group = []  # 待聚合的连续空 title 节点
+        pending_group = []  # 待标记的连续空 title 节点
 
         for child in children:
             is_empty_title = child.get("title", "") == ""
             has_table = "<table" in child.get("content", "").lower()
 
             if is_empty_title and not has_table:
-                # 空 title 且不含表格，加入待聚合组
+                # 空 title 且不含表格，加入待标记组
                 pending_group.append(child)
             else:
-                # 非空 title 或 含表格，先处理待聚合组
-                if pending_group:
-                    aggregated = self._merge_nodes(pending_group)
-                    result.append(aggregated)
-                    pending_group = []
+                # 非空 title 或 含表格，先处理待标记组
+                if len(pending_group) > 1:
+                    # 只有多个连续节点才需要标记 connect_id
+                    connect_id_counter[0] += 1
+                    current_connect_id = f"C_{connect_id_counter[0]:05d}"
+                    for node in pending_group:
+                        node["connect_id"] = current_connect_id
+                pending_group = []
 
                 # 递归处理当前节点的 children
                 if "children" in child and child["children"]:
-                    child["children"] = self._aggregate_children_empty_title(child["children"])
+                    child["children"] = self._mark_children_connected(child["children"], connect_id_counter)
 
-                result.append(child)
+        # 处理最后的待标记组
+        if len(pending_group) > 1:
+            connect_id_counter[0] += 1
+            current_connect_id = f"C_{connect_id_counter[0]:05d}"
+            for node in pending_group:
+                node["connect_id"] = current_connect_id
 
-        # 处理最后的待聚合组
-        if pending_group:
-            aggregated = self._merge_nodes(pending_group)
-            result.append(aggregated)
-
-        return result
-
-    def _merge_nodes(self, nodes: list) -> dict:
-        """
-        合并多个节点为一个
-
-        Args:
-            nodes: 要合并的节点列表
-
-        Returns:
-            合并后的单个节点
-        """
-        if len(nodes) == 1:
-            return nodes[0]
-
-        # 收集所有 pid
-        pids = [node.get("pid", "") for node in nodes]
-
-        # 拼接 content
-        contents = [node.get("content", "") for node in nodes]
-        merged_content = "\n".join(contents)
-
-        # 合并 location
-        merged_location = []
-        for node in nodes:
-            loc = node.get("location", [])
-            if loc:
-                merged_location.extend(loc)
-
-        return {
-            "pid": pids,
-            "title": "",
-            "content": merged_content,
-            "location": merged_location
-        }
+        return children
 
     def _normalize_text(self, text: str) -> str:
         """
@@ -1317,6 +1341,197 @@ class FileService:
 
         return locations
 
+    def _get_location_for_table(
+        self,
+        table_id: str,
+        table_matcher: TableMatcher,
+        page_heights: Optional[Dict[int, float]] = None
+    ) -> list:
+        """
+        使用 TableMatcher 根据表格 ID 获取位置信息
+
+        Args:
+            table_id: 表格 ID (如 t001)
+            table_matcher: TableMatcher 实例
+            page_heights: 页码 -> 页面高度映射
+
+        Returns:
+            location 列表
+        """
+        loc_info = table_matcher.find_match(table_id)
+
+        if not loc_info:
+            return []
+
+        page_str = loc_info.get("page", "")
+        bbox_str = loc_info.get("bbox", "")
+
+        if not page_str or not bbox_str:
+            return []
+
+        # 处理跨页情况: page="1|2" bbox="x0,y0,x1,y1|x0,y0,x1,y1"
+        pages = page_str.split("|")
+        bboxes = bbox_str.split("|")
+
+        locations = []
+        for i, page in enumerate(pages):
+            try:
+                page_num = int(page)
+                bbox_coords = [float(x) for x in bboxes[i].split(",")] if i < len(bboxes) else []
+
+                if len(bbox_coords) >= 4:
+                    x0, y0, x1, y1 = bbox_coords[0], bbox_coords[1], bbox_coords[2], bbox_coords[3]
+
+                    page_height = page_heights.get(page_num) if page_heights else None
+
+                    if page_height:
+                        new_t = round(page_height - y1, 4)
+                        new_b = round(page_height - y0, 4)
+
+                        locations.append({
+                            "page": page_num,
+                            "l": round(x0, 4),
+                            "t": new_t,
+                            "r": round(x1, 4),
+                            "b": new_b,
+                            "coord_origin": "TOPLEFT"
+                        })
+                    else:
+                        locations.append({
+                            "page": page_num,
+                            "l": round(x0, 4),
+                            "t": round(y1, 4),
+                            "r": round(x1, 4),
+                            "b": round(y0, 4),
+                            "coord_origin": "BOTTOMLEFT"
+                        })
+            except (ValueError, IndexError):
+                continue
+
+        return locations
+
+    def _get_location_for_toc(
+        self,
+        item_text: str,
+        id_to_location: Dict[str, Dict[str, Any]],
+        page_heights: Optional[Dict[int, float]] = None,
+        current_index: int = -1,
+        search_steps: int = 10
+    ) -> list:
+        """
+        为 is_toc=True 的元素获取位置信息（使用包含匹配）
+
+        is_toc 元素的文本格式通常是 "标题文本	页码"（如 "二、技术要求	31"）
+        PDF 中的文本可能只有 "二、技术要求" 或者 "二、技术要求31"
+
+        匹配策略：
+        1. 从 item_text 中提取标题部分（去掉页码）
+        2. 根据 pid 向两侧搜索 paragraph.txt 中的内容
+        3. 如果 pdf 读取的文本包含 unstructured 的标题文本，就取对应的 page 和 bbox
+
+        Args:
+            item_text: is_toc 元素的文本（如 "二、技术要求	31"）
+            id_to_location: id -> page/bbox 映射
+            page_heights: 页码 -> 页面高度映射
+            current_index: 当前索引位置（用于向两侧搜索）
+            search_steps: 两侧各搜索的步数
+
+        Returns:
+            location 列表
+        """
+        import re
+
+        if not item_text:
+            return []
+
+        # 1. 提取标题部分（去掉页码）
+        # 目录条目格式: "标题文本\t页码" 或 "标题文本    页码" 或 "标题文本……页码"
+        # 使用正则匹配：去掉末尾的数字（页码）和前面的 tab/空格/点
+        title_text = re.sub(r'[\t\s…\.]+\d+\s*$', '', item_text).strip()
+        if not title_text:
+            title_text = item_text.strip()
+
+        # 标准化标题文本（去掉空格和零宽字符）
+        normalized_title = normalize_text(title_text)
+        if not normalized_title:
+            return []
+
+        # 2. 获取按顺序排列的 pid 列表
+        pids = [pid for pid in id_to_location.keys() if pid.startswith("p")]
+        pids.sort(key=lambda x: int(x[1:]) if x[1:].isdigit() else 0)
+
+        if not pids:
+            return []
+
+        # 3. 确定搜索范围
+        if current_index < 0:
+            current_index = 0
+        start_left = max(0, current_index - search_steps)
+        end_right = min(len(pids), current_index + search_steps + 1)
+
+        # 4. 向两侧搜索，使用包含匹配
+        for i in range(start_left, end_right):
+            pid = pids[i]
+            loc_info = id_to_location.get(pid, {})
+            candidate_text = loc_info.get("normalized_text", "")
+
+            if not candidate_text:
+                continue
+
+            # 包含匹配：PDF 的文本包含 unstructured 的标题，或反过来
+            if normalized_title in candidate_text or candidate_text in normalized_title:
+                # 找到匹配，获取位置信息并转换坐标系
+                page_str = loc_info.get("page", "")
+                bbox_str = loc_info.get("bbox", "")
+
+                if not page_str or not bbox_str:
+                    continue
+
+                # 处理跨页情况
+                pages = page_str.split("|")
+                bboxes = bbox_str.split("|")
+
+                locations = []
+                for j, page in enumerate(pages):
+                    try:
+                        page_num = int(page)
+                        bbox_coords = [float(x) for x in bboxes[j].split(",")] if j < len(bboxes) else []
+
+                        if len(bbox_coords) >= 4:
+                            x0, y0, x1, y1 = bbox_coords[0], bbox_coords[1], bbox_coords[2], bbox_coords[3]
+
+                            page_height = page_heights.get(page_num) if page_heights else None
+
+                            if page_height:
+                                new_t = round(page_height - y1, 4)
+                                new_b = round(page_height - y0, 4)
+
+                                locations.append({
+                                    "page": page_num,
+                                    "l": round(x0, 4),
+                                    "t": new_t,
+                                    "r": round(x1, 4),
+                                    "b": new_b,
+                                    "coord_origin": "TOPLEFT"
+                                })
+                            else:
+                                locations.append({
+                                    "page": page_num,
+                                    "l": round(x0, 4),
+                                    "t": round(y1, 4),
+                                    "r": round(x1, 4),
+                                    "b": round(y0, 4),
+                                    "coord_origin": "BOTTOMLEFT"
+                                })
+                    except (ValueError, IndexError):
+                        continue
+
+                if locations:
+                    return locations
+
+        # 没有找到匹配
+        return []
+
     def _parse_fulltext_md(self, fulltext_path: Path) -> list:
         """
         解析 fulltext.md 文件为 items 列表
@@ -1327,11 +1542,17 @@ class FileService:
         - [Table] t001                            -> 表格
           <table>...</table>
 
+        toc_level 目录层级对应关系:
+        - toc_level: 0 → TOC Heading（目录标题："目  录"）
+        - toc_level: 1 → toc 1（一级目录：第一章、第二章...）
+        - toc_level: 2 → toc 2（二级目录：第1节、技术要求...）
+        - toc_level: 3 → toc 3（三级目录：一、二、三...）
+
         Args:
             fulltext_path: fulltext.md 文件路径
 
         Returns:
-            items 列表，每个元素: {"id": "P_00001", "text": "...", "category": "..."}
+            items 列表，每个元素: {"id": "P_00001", "text": "...", "category": "...", "is_toc": bool, "toc_level": int|None}
         """
         import re
 
@@ -1341,6 +1562,8 @@ class FileService:
         items = []
         id_pattern = re.compile(r'\{id=([^},]+)')
         category_pattern = re.compile(r'\[([^\]]+)\]')
+        is_toc_pattern = re.compile(r'is_toc=true')
+        toc_level_pattern = re.compile(r'toc_level=(\d+)')
 
         i = 0
         while i < len(lines):
@@ -1382,7 +1605,8 @@ class FileService:
                 items.append({
                     "id": table_id,
                     "text": '\n'.join(table_content),
-                    "category": "Table"
+                    "category": "Table",
+                    "is_toc": False
                 })
                 continue
 
@@ -1395,6 +1619,13 @@ class FileService:
                 # 提取 category
                 cat_match = category_pattern.search(line)
                 category = cat_match.group(1) if cat_match else ""
+
+                # 检查 is_toc 标记和 toc_level
+                is_toc = bool(is_toc_pattern.search(line))
+                toc_level = None
+                toc_level_match = toc_level_pattern.search(line)
+                if toc_level_match:
+                    toc_level = int(toc_level_match.group(1))
 
                 # 提取文本
                 # 移除 # 或 - 前缀
@@ -1410,11 +1641,15 @@ class FileService:
                 text = text.strip()
 
                 if item_id:  # 只添加有 id 的条目
-                    items.append({
+                    item = {
                         "id": item_id,
                         "text": text,
-                        "category": category
-                    })
+                        "category": category,
+                        "is_toc": is_toc
+                    }
+                    if toc_level is not None:
+                        item["toc_level"] = toc_level
+                    items.append(item)
 
             i += 1
 

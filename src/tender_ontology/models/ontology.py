@@ -47,3 +47,10 @@ class OntologyResponse(BaseModel):
     success: bool
     message: str
     data: Optional[dict] = None
+
+
+class MoveNodeRequest(BaseModel):
+    """Request model for moving a node to a new parent."""
+
+    node_id: str = Field(..., description="要移动的节点 ID")
+    target_parent_id: str = Field(..., description="目标父节点 ID，'root' 表示移动到根层级")

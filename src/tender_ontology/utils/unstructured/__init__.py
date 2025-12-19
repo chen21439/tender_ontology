@@ -10,6 +10,7 @@ Unstructured 文档处理工具模块
 - heading_validator: 标题二次判定
 - heading_prompt: 标题提取提示词
 - qwen_heading_api: 千问 API 调用
+- deepseek_heading_api: DeepSeek R1 API 调用
 - chapter_processor: 章节切分与 Stage 2 处理
 - unstructured_heading_extractor: 主流程协调器
 
@@ -27,6 +28,7 @@ __all__ = [
     "preprocess_docx_if_needed",
     "get_docx_version_info",
     "QwenHeadingAPI",
+    "DeepSeekHeadingAPI",
     "ChapterProcessor",
     "DocxXmlLoader",
     "HeadingValidator",
@@ -51,6 +53,9 @@ def __getattr__(name):
     elif name == "QwenHeadingAPI":
         from .qwen_heading_api import QwenHeadingAPI
         return QwenHeadingAPI
+    elif name == "DeepSeekHeadingAPI":
+        from .deepseek_heading_api import DeepSeekHeadingAPI
+        return DeepSeekHeadingAPI
     elif name == "ChapterProcessor":
         from .chapter_processor import ChapterProcessor
         return ChapterProcessor

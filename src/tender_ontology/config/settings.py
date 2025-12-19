@@ -76,6 +76,12 @@ class Settings(BaseSettings):
     qwen_api_url: str = "http://175.42.62.118:9102/v1/chat/completions"
     qwen_api_timeout: int = 120
 
+    # DeepSeek R1 API (外部)
+    deepseek_api_url: str = "http://112.111.20.89:8909/v1/chat/completions"
+    deepseek_api_key: str = "ai-0lXtWLDkRImSEtwXorLiUjzFWaWcWALu"
+    deepseek_model: str = "deepseek-r1"
+    deepseek_api_timeout: int = 120
+
     # Neo4j Database
     neo4j_uri: str = "neo4j://175.42.62.118:9094"
     neo4j_user: str = "neo4j"

@@ -626,6 +626,88 @@ async def get_task_result(
         raise HTTPException(status_code=500, detail=f"获取结果失败: {str(e)}")
 
 
+
+
+@router.put("/task/{task_id}/ontology", response_model=PDFProcessResponse, summary="上传替换ontology文件")
+async def upload_ontology(
+    task_id: str,
+    file: UploadFile = File(..., description="ontology JSON文件")
+):
+    """
+    上传并替换任务的 ontology.json 文件
+
+    Args:
+        task_id: 任务ID
+        file: 新的 ontology JSON 文件
+
+    Returns:
+        替换结果
+    """
+    try:
+        # 验证文件类型
+        if not file.filename.endswith('.json'):
+            return PDFProcessResponse(
+                success=False,
+                errCode="FILE_001",
+                errMsg="只支持 JSON 文件",
+                data=None
+            )
+
+        # 获取任务目录
+        task_dir = get_task_upload_dir(task_id)
+
+        # 查找现有的 ontology 文件
+        ontology_files = list(task_dir.glob("*_ontology.json"))
+
+        if not ontology_files:
+            return PDFProcessResponse(
+                success=False,
+                errCode="FILE_002",
+                errMsg=f"任务 {task_id} 的 ontology 文件不存在",
+                data=None
+            )
+
+        # 获取最新的 ontology 文件路径（用于替换）
+        target_file = sorted(ontology_files, key=lambda f: f.stat().st_mtime, reverse=True)[0]
+
+        # 读取上传的文件内容并验证是否为有效 JSON
+        import json
+        content = await file.read()
+        try:
+            json_data = json.loads(content.decode('utf-8'))
+        except json.JSONDecodeError as e:
+            return PDFProcessResponse(
+                success=False,
+                errCode="FILE_003",
+                errMsg=f"无效的 JSON 文件: {str(e)}",
+                data=None
+            )
+
+        # 写入文件（替换原有内容）
+        with open(target_file, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, ensure_ascii=False, indent=2)
+
+        return PDFProcessResponse(
+            success=True,
+            errCode=None,
+            errMsg=None,
+            data={
+                "taskId": task_id,
+                "fileName": target_file.name,
+                "message": "ontology 文件替换成功"
+            }
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return PDFProcessResponse(
+            success=False,
+            errCode="FILE_004",
+            errMsg=f"替换失败: {str(e)}",
+            data=None
+        )
+
 @router.delete("/task/{task_id}", response_model=PDFProcessResponse, summary="删除任务")
 async def delete_task(task_id: str):
     """

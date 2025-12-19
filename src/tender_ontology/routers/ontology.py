@@ -9,7 +9,9 @@ from tender_ontology.models.ontology import (
     OntologyNode,
     OntologyCreateRequest,
     OntologyResponse,
+    MoveNodeRequest,
 )
+from tender_ontology.services.ontology_editor import move_ontology_node
 
 router = APIRouter(prefix="/ontology")
 
@@ -76,3 +78,30 @@ async def delete_node(node_id: int):
     """
     # TODO: Implement database delete
     return OntologyResponse(success=True, message=f"Node {node_id} deleted")
+
+
+@router.post("/task/{task_id}/move-node", response_model=OntologyResponse)
+async def move_node(task_id: str, request: MoveNodeRequest):
+    """
+    移动 ontology.json 中的节点到新的父节点下
+
+    Args:
+        task_id: 任务 ID
+        request: 包含 node_id 和 target_parent_id
+
+    Returns:
+        OntologyResponse: 操作结果
+    """
+    result = move_ontology_node(
+        task_id=task_id,
+        node_id=request.node_id,
+        target_parent_id=request.target_parent_id,
+    )
+
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("error"))
+
+    return OntologyResponse(
+        success=True,
+        message=result.get("message", "节点移动成功"),
+    )

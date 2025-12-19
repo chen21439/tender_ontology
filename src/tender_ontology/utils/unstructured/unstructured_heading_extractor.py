@@ -46,7 +46,9 @@ class UnstructuredHeadingExtractor:
         self,
         verbose: bool = True,
         inspect_elements: int = 3,
-        enable_secondary_validation: bool = True
+        enable_secondary_validation: bool = True,
+        enable_stage2: bool = True,
+        use_deepseek: bool = True
     ):
         """
         初始化提取器
@@ -55,16 +57,21 @@ class UnstructuredHeadingExtractor:
             verbose: 是否打印详细信息
             inspect_elements: 解析后打印前 N 个元素的数据结构（默认3个）
             enable_secondary_validation: 是否启用二次标题判定（默认开启）
+            enable_stage2: 是否启用二阶段章节并发处理（默认开启）
+                          关闭后只使用一阶段的 level12_headings 作为最终结果
+            use_deepseek: 是否使用 DeepSeek R1 模型进行二阶段处理（默认使用 DeepSeek）
         """
         self.verbose = verbose
         self.inspect_elements = inspect_elements
         self.enable_secondary_validation = enable_secondary_validation
+        self.enable_stage2 = enable_stage2
+        self.use_deepseek = use_deepseek
 
         # 缓存实例
         self._xml_loader: Optional[DocxXmlLoader] = None
         self._heading_validator: Optional[HeadingValidator] = None
         self._qwen_api = QwenHeadingAPI(verbose=verbose)
-        self._chapter_processor = ChapterProcessor(verbose=verbose)
+        self._chapter_processor = ChapterProcessor(verbose=verbose, use_deepseek=use_deepseek)
 
     # ========== Element 数据结构检查 ==========
 
@@ -272,6 +279,14 @@ class UnstructuredHeadingExtractor:
             cat = getattr(el, "category", None) or getattr(el, "type", None)
             text = (el.text or "").strip()
 
+            # 检查 is_toc 属性和 toc_level
+            is_toc = False
+            toc_level = None
+            if hasattr(el, "metadata"):
+                is_toc = getattr(el.metadata, "is_toc", False)
+                if is_toc:
+                    toc_level = getattr(el.metadata, "toc_level", None)
+
             if cat in ["Table", "TableChunk"]:
                 # 表格 ID 从 t001 开始（1-indexed），与 paragraph.txt 保持一致
                 table_id = f"t{table_count + 1:03d}"
@@ -316,6 +331,14 @@ class UnstructuredHeadingExtractor:
             cat = getattr(el, "category", None) or getattr(el, "type", None)
             text = (el.text or "").strip()
 
+            # 检查 is_toc 属性和 toc_level
+            is_toc = False
+            toc_level = None
+            if hasattr(el, "metadata"):
+                is_toc = getattr(el.metadata, "is_toc", False)
+                if is_toc:
+                    toc_level = getattr(el.metadata, "toc_level", None)
+
             if cat in ["Table", "TableChunk"]:
                 html_text = None
                 if hasattr(el, "metadata") and hasattr(el.metadata, "text_as_html"):
@@ -345,6 +368,11 @@ class UnstructuredHeadingExtractor:
                     attrs += ", align=center"
                 elif xml_info.get("is_fake_centered"):
                     attrs += ", fake_center"
+                # 添加 is_toc 标记和 toc_level
+                if is_toc:
+                    attrs += ", is_toc=true"
+                    if toc_level is not None:
+                        attrs += f", toc_level={toc_level}"
 
                 # 标题候选项带 # 前缀
                 if is_heading_candidate:
@@ -524,30 +552,75 @@ class UnstructuredHeadingExtractor:
         if self.verbose:
             print(f"[阶段1] 一二级标题已保存: {level12_json_path.name}")
 
-        # 筛选 chapter
-        chapter_headings = [h for h in level12_headings if h.get("type") == "chapter"]
-
         stage1_time = time.time() - stage1_start
-        if self.verbose:
-            print(f"[阶段1] 找到 {len(chapter_headings)} 个章节标题")
-            print(f"[阶段1] 耗时: {stage1_time:.2f} 秒\n")
 
-        # 阶段2: 并发章节层级重建
+        # 阶段2: 并发处理章节和独立功能标题（可通过 enable_stage2 关闭）
         stage2_start = time.time()
+        stage2_time = 0.0
 
         chapter_results = []
-        if chapter_headings:
-            chapter_results = self._chapter_processor.extract_headings_by_chapters(
-                paragraph_fulltext_path,
-                chapter_headings,
-                level12_headings=level12_headings,
-                max_workers=max_workers
-            )
+        standalone_results = []
+        all_headings = []
 
-        # 聚合结果
-        all_headings = self._chapter_processor.merge_stage2_results(level12_headings, chapter_results)
+        # 筛选 chapter 和 standalone（没有 type 的标题）
+        chapter_headings = [h for h in level12_headings if h.get("type") == "chapter"]
+        standalone_headings = [h for h in level12_headings if not h.get("type")]
+
+        if self.verbose:
+            print(f"[阶段1] 找到 {len(chapter_headings)} 个章节标题")
+            print(f"[阶段1] 找到 {len(standalone_headings)} 个独立功能标题")
+            if not self.enable_stage2:
+                print(f"[阶段1] standalone 处理已关闭（enable_stage2=False）")
+            print(f"[阶段1] 耗时: {stage1_time:.2f} 秒\n")
+
+        # 使用线程池并发处理 chapter 和 standalone
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {}
+
+            # 提交章节处理任务（始终执行）
+            if chapter_headings:
+                future_chapter = executor.submit(
+                    self._chapter_processor.extract_headings_by_chapters,
+                    paragraph_fulltext_path,
+                    chapter_headings,
+                    level12_headings,
+                    max_workers
+                )
+                futures[future_chapter] = "chapter"
+
+            # 提交独立功能标题处理任务（仅当 enable_stage2=True 时执行）
+            if self.enable_stage2 and standalone_headings:
+                future_standalone = executor.submit(
+                    self._chapter_processor.extract_headings_by_standalone,
+                    paragraph_fulltext_path,
+                    standalone_headings,
+                    level12_headings,
+                    max_workers
+                )
+                futures[future_standalone] = "standalone"
+
+            # 等待所有任务完成
+            for future in as_completed(futures):
+                task_type = futures[future]
+                try:
+                    result = future.result()
+                    if task_type == "chapter":
+                        chapter_results = result
+                    else:
+                        standalone_results = result
+                except Exception as e:
+                    if self.verbose:
+                        print(f"[阶段2] {task_type} 处理失败: {e}")
+
+        # 聚合结果（章节 + 独立功能标题）
+        all_headings = self._chapter_processor.merge_all_results(
+            level12_headings, chapter_results, standalone_results
+        )
 
         stage2_time = time.time() - stage2_start
+
         total_time = time.time() - total_start
 
         # 保存最终结果
