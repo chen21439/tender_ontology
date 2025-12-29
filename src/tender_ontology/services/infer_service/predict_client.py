@@ -86,6 +86,11 @@ class PredictClient:
                 timeout=self.timeout
             )
             self._log(f"predict API 调用成功")
+            self._log(f"响应类型: {type(result).__name__}")
+            if isinstance(result, dict):
+                self._log(f"响应键: {list(result.keys())}")
+            elif isinstance(result, list):
+                self._log(f"响应列表长度: {len(result)}")
 
             response = {
                 "success": True,
@@ -95,6 +100,7 @@ class PredictClient:
             # 构建树结构
             if build_tree:
                 flat_data = self._extract_flat_data(result)
+                self._log(f"提取扁平数据: {len(flat_data) if flat_data else 'None'}")
                 if flat_data:
                     structured_data = self._build_tree(flat_data)
                     response["structured_data"] = structured_data
