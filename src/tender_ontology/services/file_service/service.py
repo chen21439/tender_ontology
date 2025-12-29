@@ -233,6 +233,29 @@ class FileService:
                 onto_data = predict_result.get("onto_data")  # extract_onto 格式
                 logger.info(f"[FileService] predict API 调用完成")
 
+                # 保存 predict 扁平数据到 _predict.json
+                raw_data = predict_result.get("data")
+                if raw_data:
+                    import json
+                    # 提取扁平数组
+                    flat_data = None
+                    if isinstance(raw_data, list):
+                        flat_data = raw_data
+                    elif isinstance(raw_data, dict):
+                        for key in ["data", "items", "nodes", "lines", "result"]:
+                            if key in raw_data and isinstance(raw_data[key], list):
+                                flat_data = raw_data[key]
+                                break
+
+                    if flat_data:
+                        predict_path = output_dir / f"{file_path.stem}_predict.json"
+                        predict_path.write_text(
+                            json.dumps(flat_data, ensure_ascii=False, indent=2),
+                            encoding='utf-8'
+                        )
+                        artifacts["predict_path"] = str(predict_path)
+                        logger.info(f"[FileService] Predict 扁平数据已保存: {predict_path.name}, 共 {len(flat_data)} 条")
+
             # 如果 API 响应中没有数据，尝试从文件读取
             if not structured_data:
                 import json
