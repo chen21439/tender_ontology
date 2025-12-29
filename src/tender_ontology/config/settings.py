@@ -89,7 +89,22 @@ class Settings(BaseSettings):
     neo4j_database: str = "neo4j"
 
     # DOCX 转 PDF 服务
-    docx_pdf_service_url: str = "http://localhost:8080"
+    docx_service_host: str = "localhost"
+    docx_pdf_service_port: int = 9199
+
+    # 推理服务 (predict API)
+    infer_service_host: str = "localhost"
+    infer_service_port: int = 9129
+
+    @property
+    def docx_pdf_service_url(self) -> str:
+        """DOCX 转 PDF 服务地址"""
+        return f"http://{self.docx_service_host}:{self.docx_pdf_service_port}"
+
+    @property
+    def infer_service_url(self) -> str:
+        """推理服务地址 (predict API)"""
+        return f"http://{self.infer_service_host}:{self.infer_service_port}"
 
     # Aspose Cloud API (DOCX 转 PDF)
     # 直接使用 Bearer Token，无需 OAuth 流程

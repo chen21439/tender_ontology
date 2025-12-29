@@ -195,9 +195,9 @@ class FileService:
 
         流程：
         1. 调用 DOCX 转 PDF 服务 (/process)
-        2. 调用第二个接口（TODO: 等待提供）
+        2. 轮询等待完成
         3. 下载结果 ZIP (/artifact/{taskId})
-        4. 使用 UnstructuredHeadingExtractor 提取标题
+        4. 调用 predict API 进行推理
         """
         logger.info(f"[FileService] 开始处理 DOCX...")
 
@@ -208,72 +208,54 @@ class FileService:
 
             artifacts = {}
 
-            # ========== 并行执行两个任务 ==========
-            # 1. 调用 DOCX 转 PDF 服务（下载 ZIP）
-            # 2. Unstructured 提取标题
-            import concurrent.futures
-
-            logger.info(f"[FileService] 并行启动: DOCX 转 PDF + Unstructured 提取...")
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-                # 提交两个任务
-                pdf_future = executor.submit(
-                    self._call_docx_to_pdf_service,
-                    file_path,
-                    output_dir
-                )
-                unstructured_future = executor.submit(
-                    self.docx_extractor.extract_full_hierarchy,
-                    file_path,
-                    8  # max_workers
-                )
-
-                # 等待两个任务完成
-                pdf_result = pdf_future.result()
-                result = unstructured_future.result()
+            # ========== Step 1: 调用 DOCX 转 PDF 服务（下载 ZIP） ==========
+            logger.info(f"[FileService] Step 1: 调用 DOCX 转 PDF 服务...")
+            pdf_result = self._call_docx_to_pdf_service(file_path, output_dir)
 
             # 处理 PDF 结果
-            id_to_location = {}
-            page_heights = {}
             if pdf_result:
                 artifacts["docx_pdf"] = pdf_result
                 artifacts["pdf_path"] = pdf_result.get("pdf_path", "")
                 logger.info(f"[FileService] DOCX 转 PDF 完成: {pdf_result.get('pdf_path', '')}")
 
-                # 解析位置信息
-                id_to_location = self._parse_location_files(output_dir)
-                logger.info(f"[FileService] 解析位置信息: {len(id_to_location)} 个元素")
+            # ========== Step 2: 调用 predict API (infer_api) ==========
+            logger.info(f"[FileService] Step 2: 调用 predict API...")
+            predict_result = self._call_predict_service(
+                document_name=file_path.stem,
+                task_id=task_id
+            )
 
-                # 从 PDF 提取页面高度（用于坐标系转换）
-                pdf_path = Path(pdf_result.get("pdf_path", ""))
-                if pdf_path.exists():
-                    page_heights = self._extract_page_heights_from_pdf(pdf_path)
+            structured_data = None
+            onto_data = None
+            if predict_result:
+                artifacts["predict"] = predict_result
+                structured_data = predict_result.get("structured_data")
+                onto_data = predict_result.get("onto_data")  # extract_onto 格式
+                logger.info(f"[FileService] predict API 调用完成")
 
-            # 处理 Unstructured 结果
-            logger.info(f"[FileService] Unstructured 提取完成")
+                # 保存树结构到 _tree.json
+                if structured_data:
+                    import json
+                    tree_path = output_dir / f"{file_path.stem}_tree.json"
+                    tree_path.write_text(
+                        json.dumps(structured_data, ensure_ascii=False, indent=2),
+                        encoding='utf-8'
+                    )
+                    artifacts["tree_path"] = str(tree_path)
+                    logger.info(f"[FileService] 树结构已保存: {tree_path.name}")
 
-            # 构建返回结果
-            artifacts.update({
-                "section_header_md": str(result.get("section_header_md_path", "")),
-                "title_with_id_md": str(result.get("title_with_id_md_path", "")),
-                "level12_count": len(result.get("level12_headings", [])),
-                "all_headings_count": len(result.get("all_headings", []))
-            })
+                # 保存 onto 格式数据到 _agent.json
+                if onto_data:
+                    import json
+                    agent_path = output_dir / f"{file_path.stem}_agent.json"
+                    agent_path.write_text(
+                        json.dumps(onto_data, ensure_ascii=False, indent=2),
+                        encoding='utf-8'
+                    )
+                    artifacts["agent_path"] = str(agent_path)
+                    logger.info(f"[FileService] Agent JSON 已保存: {agent_path.name}")
 
-            # ========== Step 3: 构建 agent.json 并调用 extract_onto API ==========
-            all_headings = result.get("all_headings", [])
-            if all_headings:
-                onto_result = self._build_agent_and_call_onto_api(
-                    task_id=task_id,
-                    output_dir=output_dir,
-                    file_stem=file_path.stem,
-                    all_headings=all_headings,
-                    page_heights=page_heights
-                )
-                if onto_result:
-                    artifacts.update(onto_result)
-
-            # 更新状态为"完成"
+            # ========== predict 完成后标记任务为完成 ==========
             if db_task_id:
                 self._update_task_status(
                     db_task_id,
@@ -281,15 +263,77 @@ class FileService:
                     message="DOCX 解析完成",
                     artifacts=artifacts
                 )
+                logger.info(f"[FileService] 任务状态已更新为完成")
+
+            # ========== Step 3: 调用 extract_onto API（可选，任务已完成） ==========
+            # 使用 onto_data（extract_onto 格式），如果没有则使用 structured_data
+            extract_data = onto_data or structured_data
+            if extract_data:
+                logger.info(f"[FileService] Step 3: 调用 extract_onto API...")
+                onto_result = self._call_extract_onto_api(
+                    task_id=task_id,
+                    structured_data=extract_data,
+                    output_dir=output_dir,
+                    file_stem=file_path.stem
+                )
+                if onto_result:
+                    artifacts["ontology_path"] = onto_result.get("ontology_path")
+                    logger.info(f"[FileService] extract_onto API 调用完成")
+            else:
+                logger.info(f"[FileService] Step 3: 跳过 extract_onto（无数据）")
+
+            # ========== 以下为 Unstructured 路线代码（暂时注释） ==========
+            # import concurrent.futures
+            # logger.info(f"[FileService] 并行启动: DOCX 转 PDF + Unstructured 提取...")
+            # with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            #     pdf_future = executor.submit(
+            #         self._call_docx_to_pdf_service,
+            #         file_path,
+            #         output_dir
+            #     )
+            #     unstructured_future = executor.submit(
+            #         self.docx_extractor.extract_full_hierarchy,
+            #         file_path,
+            #         8  # max_workers
+            #     )
+            #     pdf_result = pdf_future.result()
+            #     result = unstructured_future.result()
+            #
+            # # 解析位置信息
+            # id_to_location = self._parse_location_files(output_dir)
+            # logger.info(f"[FileService] 解析位置信息: {len(id_to_location)} 个元素")
+            #
+            # # 从 PDF 提取页面高度（用于坐标系转换）
+            # pdf_path = Path(pdf_result.get("pdf_path", ""))
+            # if pdf_path.exists():
+            #     page_heights = self._extract_page_heights_from_pdf(pdf_path)
+            #
+            # logger.info(f"[FileService] Unstructured 提取完成")
+            # artifacts.update({
+            #     "section_header_md": str(result.get("section_header_md_path", "")),
+            #     "title_with_id_md": str(result.get("title_with_id_md_path", "")),
+            #     "level12_count": len(result.get("level12_headings", [])),
+            #     "all_headings_count": len(result.get("all_headings", []))
+            # })
+            #
+            # # 构建 agent.json 并调用 extract_onto API
+            # all_headings = result.get("all_headings", [])
+            # if all_headings:
+            #     onto_result = self._build_agent_and_call_onto_api(
+            #         task_id=task_id,
+            #         output_dir=output_dir,
+            #         file_stem=file_path.stem,
+            #         all_headings=all_headings,
+            #         page_heights=page_heights
+            #     )
+            #     if onto_result:
+            #         artifacts.update(onto_result)
+            # ========== Unstructured 路线代码结束 ==========
 
             return {
                 "success": True,
                 "task_id": task_id,
                 "file_type": "docx",
-                "total_time": result.get("total_time", 0),
-                "stage0_time": result.get("stage0_time", 0),
-                "stage1_time": result.get("stage1_time", 0),
-                "stage2_time": result.get("stage2_time", 0),
                 "artifacts": artifacts
             }
 
@@ -386,6 +430,131 @@ class FileService:
             traceback.print_exc()
             return None
 
+    def _call_predict_service(
+        self,
+        document_name: str,
+        task_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        调用 predict API 进行推理
+
+        Args:
+            document_name: 文档名称（不含扩展名）
+            task_id: 任务 ID
+
+        Returns:
+            API 响应结果，包含:
+            - data: 原始响应数据
+            - structured_data: 树结构
+            - onto_data: extract_onto 格式数据
+        """
+        try:
+            from tender_ontology.services.infer_service import PredictClient
+
+            client = PredictClient(verbose=True)
+            result = client.predict(
+                document_name=document_name,
+                task_id=task_id,
+                build_tree=True,
+                convert_to_onto=True
+            )
+
+            if result.get("success"):
+                logger.info(f"[FileService] predict API 调用成功")
+                # 返回完整结果（包含 structured_data 和 onto_data）
+                return {
+                    "data": result.get("data"),
+                    "structured_data": result.get("structured_data"),
+                    "onto_data": result.get("onto_data")
+                }
+            else:
+                logger.info(f"[FileService] predict API 调用失败: {result.get('error')}")
+                return None
+
+        except Exception as e:
+            logger.info(f"[FileService] predict 服务调用失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+    def _call_extract_onto_api(
+        self,
+        task_id: str,
+        structured_data: list,
+        output_dir: Path,
+        file_stem: str
+    ) -> Optional[Dict[str, Any]]:
+        """
+        调用 extract_onto API 进行本体提取
+
+        Args:
+            task_id: 任务 ID
+            structured_data: 结构化数据（文档树）
+            output_dir: 输出目录
+            file_stem: 文件名（不含扩展名）
+
+        Returns:
+            包含 ontology_path 的字典，或 None
+        """
+        import json
+        import time
+        import requests
+
+        try:
+            from tender_ontology.config.settings import settings
+
+            api_url = settings.tender_extract_api_url
+            request_data = {
+                "task_id": task_id,
+                "pdf_url": "",
+                "document_type": "",
+                "region": "",
+                "structured_data": structured_data
+            }
+
+            logger.info(f"[FileService] 调用 extract_onto API...")
+            logger.info(f"[FileService] URL: {api_url}")
+
+            start_time = time.time()
+            response = requests.post(
+                api_url,
+                json=request_data,
+                headers={"Content-Type": "application/json"},
+                timeout=settings.tender_extract_api_timeout
+            )
+            elapsed_time = time.time() - start_time
+
+            if response.status_code == 200:
+                api_result = response.json()
+                logger.info(f"[FileService] extract_onto API 调用成功，耗时: {elapsed_time:.2f} 秒")
+
+                # 保存响应到 _ontology.json
+                ontology_path = output_dir / f"{file_stem}_ontology.json"
+                ontology_path.write_text(
+                    json.dumps(api_result, ensure_ascii=False, indent=2),
+                    encoding='utf-8'
+                )
+                logger.info(f"[FileService] Ontology JSON 已保存: {ontology_path.name}")
+
+                return {
+                    "ontology_path": str(ontology_path),
+                    "elapsed_time": elapsed_time,
+                    "data": api_result
+                }
+            else:
+                logger.info(f"[FileService] extract_onto API 调用失败: HTTP {response.status_code}")
+                logger.info(f"[FileService] 响应: {response.text[:500]}")
+                return None
+
+        except requests.Timeout:
+            logger.info(f"[FileService] extract_onto API 请求超时")
+            return None
+        except Exception as e:
+            logger.info(f"[FileService] extract_onto API 调用失败: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def _extract_zip(
         self,
         zip_path: Path,
@@ -424,7 +593,6 @@ class FileService:
                         logger.info(f"[FileService] 解压并重命名: {name} -> {target_pdf_name}")
                         extracted.append(str(target_path))
                     else:
-                        logger.info(f"[FileService] 解压: {name}")
                         extracted.append(str(extracted_path))
         except Exception as e:
             logger.info(f"[FileService] 解压失败: {e}")
