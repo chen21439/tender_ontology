@@ -233,27 +233,50 @@ class FileService:
                 onto_data = predict_result.get("onto_data")  # extract_onto 格式
                 logger.info(f"[FileService] predict API 调用完成")
 
-                # 保存树结构到 _tree.json
-                if structured_data:
-                    import json
-                    tree_path = output_dir / f"{file_path.stem}_tree.json"
-                    tree_path.write_text(
-                        json.dumps(structured_data, ensure_ascii=False, indent=2),
-                        encoding='utf-8'
-                    )
-                    artifacts["tree_path"] = str(tree_path)
-                    logger.info(f"[FileService] 树结构已保存: {tree_path.name}")
+            # 如果 API 响应中没有数据，尝试从文件读取
+            if not structured_data:
+                import json
+                predict_json_path = output_dir / f"{file_path.stem}.json"
+                if predict_json_path.exists():
+                    logger.info(f"[FileService] 从文件读取 predict 结果: {predict_json_path.name}")
+                    try:
+                        flat_data = json.loads(predict_json_path.read_text(encoding='utf-8'))
+                        if flat_data and isinstance(flat_data, list):
+                            # 构建树结构
+                            from tender_ontology.utils.tree_builder import (
+                                build_tree_from_flat_data,
+                                convert_tree_to_onto_format
+                            )
+                            structured_data = build_tree_from_flat_data(flat_data, verbose=True)
+                            logger.info(f"[FileService] 树构建完成，根节点数: {len(structured_data)}")
 
-                # 保存 onto 格式数据到 _agent.json
-                if onto_data:
-                    import json
-                    agent_path = output_dir / f"{file_path.stem}_agent.json"
-                    agent_path.write_text(
-                        json.dumps(onto_data, ensure_ascii=False, indent=2),
-                        encoding='utf-8'
-                    )
-                    artifacts["agent_path"] = str(agent_path)
-                    logger.info(f"[FileService] Agent JSON 已保存: {agent_path.name}")
+                            # 转换为 onto 格式
+                            onto_data = convert_tree_to_onto_format(structured_data, verbose=True)
+                            logger.info(f"[FileService] 格式转换完成，onto_data 根节点数: {len(onto_data)}")
+                    except Exception as e:
+                        logger.info(f"[FileService] 读取/解析 predict JSON 失败: {e}")
+
+            # 保存树结构到 _tree.json
+            if structured_data:
+                import json
+                tree_path = output_dir / f"{file_path.stem}_tree.json"
+                tree_path.write_text(
+                    json.dumps(structured_data, ensure_ascii=False, indent=2),
+                    encoding='utf-8'
+                )
+                artifacts["tree_path"] = str(tree_path)
+                logger.info(f"[FileService] 树结构已保存: {tree_path.name}")
+
+            # 保存 onto 格式数据到 _agent.json
+            if onto_data:
+                import json
+                agent_path = output_dir / f"{file_path.stem}_agent.json"
+                agent_path.write_text(
+                    json.dumps(onto_data, ensure_ascii=False, indent=2),
+                    encoding='utf-8'
+                )
+                artifacts["agent_path"] = str(agent_path)
+                logger.info(f"[FileService] Agent JSON 已保存: {agent_path.name}")
 
             # ========== predict 完成后标记任务为完成 ==========
             if db_task_id:
