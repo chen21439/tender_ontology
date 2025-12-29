@@ -69,6 +69,7 @@ start_service() {
     nohup uvicorn tender_ontology.main:app \
         --host 0.0.0.0 \
         --port "$PORT" \
+        --reload  \
         >> "$LOG_FILE" 2>&1 &
 
     NEW_PID=$!
