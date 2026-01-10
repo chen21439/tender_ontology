@@ -608,6 +608,9 @@ async def get_task_result(
             # ontology 类型特殊处理：提取 data 数组
             if result_type == "ontology" and isinstance(json_data, dict) and "data" in json_data:
                 json_data = {"dataList": json_data["data"]}
+            # construct 类型特殊处理：提取 predictions 数组
+            elif result_type == "construct" and isinstance(json_data, dict) and "predictions" in json_data:
+                json_data = {"dataList": json_data["predictions"]}
             # 如果 json_data 是数组（如 agent、model、markdown_json），包装成字典
             elif isinstance(json_data, list):
                 json_data = {"dataList": json_data}
