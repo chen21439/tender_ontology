@@ -553,7 +553,8 @@ async def get_task_result(
             "agent": "*_agent.json",  # 内部调用生成的结构化数据
             "level12": "*_level12.json",
             "forward": "*_forward.json",
-            "ontology": "*_ontology.json"  # extract_onto API 返回的结果
+            "ontology": "*_ontology.json",  # extract_onto API 返回的结果
+            "construct": "*_construct.json"  # 知识图谱构建结果
         }
 
         if result_type not in file_patterns:
