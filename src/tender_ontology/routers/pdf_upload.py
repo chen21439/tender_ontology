@@ -23,7 +23,8 @@ from tender_ontology.models.pdf_task import (
     TaskStatusResponse,
     PageRequest,
     PageResponse,
-    PageDataResponse
+    PageDataResponse,
+    ConstructUpdateRequest
 )
 from tender_ontology.utils.db.local_storage import is_local_mode, get_local_storage
 
@@ -711,6 +712,143 @@ async def upload_ontology(
             errMsg=f"替换失败: {str(e)}",
             data=None
         )
+
+
+@router.patch("/task/{task_id}/construct", response_model=PDFProcessResponse, summary="修改construct条目")
+async def update_construct_item(
+    task_id: str,
+    request: ConstructUpdateRequest
+):
+    """
+    修改任务的 construct.json 中的条目
+
+    通过 line_id 查找对应元素，更新 class、parent_id、relation 字段
+
+    Args:
+        task_id: 任务ID
+        request: 修改请求
+            - lineId: 通过 line_id 查找元素（必填）
+            - className: 要修改的 class（可选）
+            - parentId: 要修改的 parent_id（可选）
+            - relation: 要修改的 relation（可选）
+
+    Returns:
+        修改结果
+    """
+    try:
+        import json
+
+        # 获取任务目录
+        task_dir = get_task_upload_dir(task_id)
+
+        # 查找 construct 文件
+        construct_files = list(task_dir.glob("*_construct.json"))
+
+        if not construct_files:
+            return PDFProcessResponse(
+                success=False,
+                errCode="FILE_001",
+                errMsg=f"任务 {task_id} 的 construct 文件不存在",
+                data=None
+            )
+
+        # 获取最新的 construct 文件
+        target_file = sorted(construct_files, key=lambda f: f.stat().st_mtime, reverse=True)[0]
+
+        # 读取文件内容
+        with open(target_file, 'r', encoding='utf-8') as f:
+            json_data = json.load(f)
+
+        # 查找 predictions 数组中 line_id 匹配的元素
+        predictions = json_data.get("predictions", [])
+
+        # 构建 line_id -> item 的映射，便于快速查找
+        line_id_map = {item.get("line_id"): item for item in predictions}
+
+        # 查找目标元素
+        if request.lineId not in line_id_map:
+            return PDFProcessResponse(
+                success=False,
+                errCode="ITEM_001",
+                errMsg=f"未找到 line_id={request.lineId} 的条目",
+                data=None
+            )
+
+        target_item = line_id_map[request.lineId]
+
+        # 校验 parent_id
+        if request.parentId is not None:
+            # 校验1: parent_id 不能指向自身
+            if request.parentId == request.lineId:
+                return PDFProcessResponse(
+                    success=False,
+                    errCode="VALID_001",
+                    errMsg=f"parent_id 不能指向自身 (line_id={request.lineId})",
+                    data=None
+                )
+
+            # 校验2: 检测循环引用
+            # 从新的 parent_id 开始，沿着 parent 链向上查找，如果遇到当前 line_id 则存在循环
+            visited = set()
+            current_id = request.parentId
+
+            while current_id is not None and current_id != 0:
+                # 如果回到了当前要修改的元素，说明存在循环
+                if current_id == request.lineId:
+                    return PDFProcessResponse(
+                        success=False,
+                        errCode="VALID_002",
+                        errMsg=f"检测到循环引用: 设置 parent_id={request.parentId} 会导致循环",
+                        data=None
+                    )
+
+                # 防止无限循环（数据本身已有循环的情况）
+                if current_id in visited:
+                    break
+                visited.add(current_id)
+
+                # 查找当前元素的 parent
+                current_item = line_id_map.get(current_id)
+                if current_item is None:
+                    break
+                current_id = current_item.get("parent_id")
+
+        # 更新字段（只更新传递了值的字段）
+        if request.className is not None:
+            target_item["class"] = request.className
+        if request.parentId is not None:
+            target_item["parent_id"] = request.parentId
+        if request.relation is not None:
+            target_item["relation"] = request.relation
+
+        updated_item = target_item
+
+        # 保存修改后的文件
+        with open(target_file, 'w', encoding='utf-8') as f:
+            json.dump(json_data, f, ensure_ascii=False, indent=2)
+
+        return PDFProcessResponse(
+            success=True,
+            errCode=None,
+            errMsg=None,
+            data={
+                "taskId": task_id,
+                "lineId": request.lineId,
+                "updatedItem": updated_item,
+                "message": "construct 条目修改成功"
+            }
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return PDFProcessResponse(
+            success=False,
+            errCode="UPDATE_001",
+            errMsg=f"修改失败: {str(e)}",
+            data=None
+        )
+
 
 @router.delete("/task/{task_id}", response_model=PDFProcessResponse, summary="删除任务")
 async def delete_task(task_id: str):

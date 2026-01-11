@@ -43,3 +43,11 @@ class PageResponse(BaseModel):
     errCode: Optional[str] = None
     errMsg: Optional[str] = None
     data: PageDataResponse
+
+
+class ConstructUpdateRequest(BaseModel):
+    """修改 construct 条目请求"""
+    lineId: int  # 通过 line_id 查找元素（必填）
+    className: Optional[str] = None  # 要修改的 class
+    parentId: Optional[int] = None  # 要修改的 parent_id
+    relation: Optional[str] = None  # 要修改的 relation
