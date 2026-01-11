@@ -850,6 +850,58 @@ async def update_construct_item(
         )
 
 
+# 训练数据目录
+TRAIN_DATA_DIR = Path("/data/LLM_group/layoutlmft/data/tender_document/train")
+
+
+@router.get("/train/search", response_model=PDFProcessResponse, summary="搜索训练数据文件")
+async def search_train_files(keyword: str):
+    """
+    根据关键词模糊搜索训练数据文件
+
+    Args:
+        keyword: 搜索关键词
+
+    Returns:
+        匹配的文件名列表
+    """
+    try:
+        if not TRAIN_DATA_DIR.exists():
+            return PDFProcessResponse(
+                success=False,
+                errCode="DIR_001",
+                errMsg=f"训练数据目录不存在: {TRAIN_DATA_DIR}",
+                data=None
+            )
+
+        # 搜索所有 json 文件，模糊匹配文件名
+        matched_files = []
+        for json_file in TRAIN_DATA_DIR.glob("*.json"):
+            if keyword in json_file.stem:  # stem 是不带扩展名的文件名
+                matched_files.append(json_file.name)
+
+        return PDFProcessResponse(
+            success=True,
+            errCode=None,
+            errMsg=None,
+            data={
+                "keyword": keyword,
+                "total": len(matched_files),
+                "dataList": matched_files
+            }
+        )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return PDFProcessResponse(
+            success=False,
+            errCode="SEARCH_001",
+            errMsg=f"搜索失败: {str(e)}",
+            data=None
+        )
+
+
 @router.delete("/task/{task_id}", response_model=PDFProcessResponse, summary="删除任务")
 async def delete_task(task_id: str):
     """
