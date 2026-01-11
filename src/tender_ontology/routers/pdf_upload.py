@@ -714,7 +714,7 @@ async def upload_ontology(
         )
 
 
-@router.patch("/task/{task_id}/construct", response_model=PDFProcessResponse, summary="修改construct条目")
+@router.post("/task/{task_id}/construct", response_model=PDFProcessResponse, summary="修改construct条目")
 async def update_construct_item(
     task_id: str,
     request: ConstructUpdateRequest
