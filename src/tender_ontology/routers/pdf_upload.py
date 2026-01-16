@@ -633,6 +633,61 @@ async def get_task_result(
 
 
 
+@router.get("/task/{task_id}/image", summary="获取任务页面图片")
+async def get_task_image(
+    task_id: str,
+    page: int = 0
+):
+    """
+    获取任务的页面图片
+
+    Args:
+        task_id: 任务ID
+        page: 页码（从0开始）
+
+    Returns:
+        PNG 图片文件
+    """
+    try:
+        # 构建任务目录路径
+        task_dir = get_task_upload_dir(task_id)
+
+        # 查找原始文件名（PDF 或 DOCX）
+        source_files = list(task_dir.glob("*.pdf")) + list(task_dir.glob("*.docx"))
+
+        if not source_files:
+            raise HTTPException(
+                status_code=404,
+                detail=f"任务 {task_id} 的源文件不存在"
+            )
+
+        # 获取文件名（不带扩展名）
+        source_file = source_files[0]
+        filename_stem = source_file.stem  # 不带扩展名的文件名
+
+        # 构建图片路径: images/{filename}/{page}.png
+        image_path = task_dir / "images" / filename_stem / f"{page}.png"
+
+        if not image_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"任务 {task_id} 的第 {page} 页图片不存在"
+            )
+
+        return FileResponse(
+            path=str(image_path),
+            filename=f"{page}.png",
+            media_type="image/png"
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"获取图片失败: {str(e)}")
+
+
 @router.put("/task/{task_id}/ontology", response_model=PDFProcessResponse, summary="上传替换ontology文件")
 async def upload_ontology(
     task_id: str,
