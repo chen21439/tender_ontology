@@ -838,12 +838,12 @@ async def upload_construct(
             existing_data = json.load(f)
 
         # 更新 predictions 字段
-        if isinstance(existing_data, dict):
-            # 文件是字典格式，更新 predictions 字段
+        if isinstance(existing_data, dict) and "predictions" in existing_data:
+            # 文件是字典格式且有 predictions 字段，替换它
             existing_data["predictions"] = upload_data
         else:
-            # 文件本身就是数组格式，直接替换
-            existing_data = upload_data
+            # 文件没有 predictions 字段，创建新的 JSON 结构
+            existing_data = {"predictions": upload_data}
 
         # 写入文件
         with open(target_file, 'w', encoding='utf-8') as f:
