@@ -772,14 +772,14 @@ async def upload_ontology(
 @router.put("/task/{task_id}/construct", response_model=PDFProcessResponse, summary="上传替换construct文件")
 async def upload_construct(
     task_id: str,
-    file: UploadFile = File(..., description="construct JSON文件")
+    file: UploadFile = File(..., description="construct JSON文件（数组格式）")
 ):
     """
-    上传并替换任务的 construct.json 文件
+    上传并替换任务的 construct.json 中的 predictions 数组
 
     Args:
         task_id: 任务ID
-        file: 新的 construct JSON 文件
+        file: 新的 predictions 数组 JSON 文件
 
     Returns:
         替换结果
@@ -815,7 +815,7 @@ async def upload_construct(
         import json
         content = await file.read()
         try:
-            json_data = json.loads(content.decode('utf-8'))
+            upload_data = json.loads(content.decode('utf-8'))
         except json.JSONDecodeError as e:
             return PDFProcessResponse(
                 success=False,
@@ -824,9 +824,30 @@ async def upload_construct(
                 data=None
             )
 
-        # 写入文件（替换原有内容）
+        # 验证上传的数据是数组格式
+        if not isinstance(upload_data, list):
+            return PDFProcessResponse(
+                success=False,
+                errCode="FILE_005",
+                errMsg="上传的数据必须是数组格式",
+                data=None
+            )
+
+        # 读取现有的 construct 文件
+        with open(target_file, 'r', encoding='utf-8') as f:
+            existing_data = json.load(f)
+
+        # 更新 predictions 字段
+        if isinstance(existing_data, dict):
+            # 文件是字典格式，更新 predictions 字段
+            existing_data["predictions"] = upload_data
+        else:
+            # 文件本身就是数组格式，直接替换
+            existing_data = upload_data
+
+        # 写入文件
         with open(target_file, 'w', encoding='utf-8') as f:
-            json.dump(json_data, f, ensure_ascii=False, indent=2)
+            json.dump(existing_data, f, ensure_ascii=False, indent=2)
 
         return PDFProcessResponse(
             success=True,
@@ -835,7 +856,7 @@ async def upload_construct(
             data={
                 "taskId": task_id,
                 "fileName": target_file.name,
-                "message": "construct 文件替换成功"
+                "message": "construct predictions 替换成功"
             }
         )
 
@@ -895,8 +916,13 @@ async def update_construct_item(
         with open(target_file, 'r', encoding='utf-8') as f:
             json_data = json.load(f)
 
-        # 查找 predictions 数组中 line_id 匹配的元素
-        predictions = json_data.get("predictions", [])
+        # 兼容两种格式：直接数组 或 {"predictions": [...]}
+        if isinstance(json_data, list):
+            predictions = json_data
+            is_list_format = True
+        else:
+            predictions = json_data.get("predictions", [])
+            is_list_format = False
 
         # 构建 line_id -> item 的映射，便于快速查找
         line_id_map = {item.get("line_id"): item for item in predictions}
