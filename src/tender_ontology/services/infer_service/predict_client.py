@@ -4,6 +4,8 @@ Predict API 客户端
 调用推理服务的 /predict 接口
 """
 
+import threading
+import time
 from typing import Dict, Any, Optional, List
 
 from tender_ontology.utils.request.http_client import HttpClient
@@ -43,6 +45,24 @@ class PredictClient:
         """打印日志"""
         if self.verbose:
             logger.info(f"[PredictClient] {message}")
+
+    def _trigger_predict1_delayed(self, document_name: str, task_id: Optional[str] = None):
+        """延时 15 秒后触发 predict1（后台线程执行）"""
+        def delayed_call():
+            time.sleep(15)
+            self._log(f"延时触发 predict1: document_name={document_name}")
+            try:
+                self.http.post_json(
+                    endpoint="/predict1",
+                    data={"document_name": document_name, "task_id": task_id} if task_id else {"document_name": document_name},
+                    timeout=self.timeout
+                )
+                self._log("predict1 触发成功")
+            except Exception as e:
+                self._log(f"predict1 触发失败: {e}")
+
+        thread = threading.Thread(target=delayed_call, daemon=True)
+        thread.start()
 
     def predict(
         self,
@@ -111,6 +131,9 @@ class PredictClient:
                         onto_data = self._convert_to_onto_format(structured_data, page_heights)
                         response["onto_data"] = onto_data
                         self._log(f"格式转换完成，onto_data 根节点数: {len(onto_data)}")
+
+            # 延时 15 秒后触发 predict1
+            self._trigger_predict1_delayed(document_name, task_id)
 
             return response
 
