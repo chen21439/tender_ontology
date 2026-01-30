@@ -293,6 +293,177 @@ async def upload_pdf(
         )
 
 
+@router.post("/upload_pdf_split", response_model=PDFProcessResponse, summary="上传文件并等待分割结果")
+async def upload_pdf_split(
+    file: UploadFile = File(..., description="PDF或DOCX文件"),
+    timeout: int = Form(300, description="等待超时时间(秒)")
+):
+    """
+    上传 PDF/DOCX 文件并等待 split_result.json 产生
+
+    功能:
+    1. 接收文件上传
+    2. 生成唯一任务ID
+    3. 保存文件到 static/upload/{task_id}/
+    4. 启动后台处理
+    5. 轮询等待 {filename}_split_result.json 产生
+    6. 返回 split_result.json 内容
+
+    返回:
+        任务ID和分割结果
+    """
+    try:
+        # 1. 验证文件类型
+        filename_lower = file.filename.lower()
+        if not (filename_lower.endswith('.pdf') or filename_lower.endswith('.docx')):
+            return PDFProcessResponse(
+                success=False,
+                errCode="FILE_001",
+                errMsg="只支持 PDF 和 DOCX 文件",
+                data=None
+            )
+
+        file_type = "pdf" if filename_lower.endswith('.pdf') else "docx"
+
+        print(f"[Upload Split] ========== Start ==========")
+        print(f"[Upload Split] Filename: {file.filename}")
+        print(f"[Upload Split] Type: {file_type}")
+        print(f"[Upload Split] Timeout: {timeout}s")
+        print(f"[Upload Split] ================================")
+
+        # 2. 创建任务记录，获取任务ID
+        task_id = None
+        db_task_id = None
+
+        if is_local_mode():
+            try:
+                storage = get_local_storage()
+                task = storage.create_task(
+                    file_name=file.filename,
+                    file_path=None
+                )
+                db_task_id = task["id"]
+                task_id = str(db_task_id)
+                print(f"[Upload Split] Local storage record created, task_id: {task_id}")
+            except Exception as e:
+                print(f"[Upload Split] Local storage save failed: {e}")
+                task_id = generate_task_id()
+        else:
+            try:
+                from tender_ontology.utils.db.mysql import get_db, ComplianceService
+
+                mysql = get_db()
+                service = ComplianceService(mysql)
+                db_task = service.create_task_from_pdf(pdf_path=None, file_id=None)
+
+                db_task_id = db_task.id
+                task_id = str(db_task_id)
+                print(f"[Upload Split] DB record created, task_id: {task_id}")
+
+            except Exception as e:
+                print(f"[Upload Split] DB save failed: {e}")
+                task_id = generate_task_id()
+
+        # 3. 保存文件到 static/upload/{task_id}/ 目录
+        task_dir = get_task_upload_dir(task_id)
+        original_filename = file.filename
+        file_stem = Path(original_filename).stem
+        file_path = task_dir / original_filename
+
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        print(f"[Upload Split] File saved: {file_path}")
+
+        # 4. 更新任务记录的文件路径
+        if db_task_id:
+            if is_local_mode():
+                try:
+                    storage = get_local_storage()
+                    relative_path = str(file_path.relative_to(task_dir.parent.parent))
+                    storage.update_task_file_path(db_task_id, relative_path, original_filename)
+                except Exception as e:
+                    print(f"[Upload Split] Local storage update failed: {e}")
+            else:
+                try:
+                    from tender_ontology.utils.db.mysql import get_db
+                    from tender_ontology.utils.db.mysql.models import ComplianceFileTask
+
+                    mysql = get_db()
+                    with mysql.get_session() as session:
+                        task = session.query(ComplianceFileTask).filter(
+                            ComplianceFileTask.id == db_task_id
+                        ).first()
+                        if task:
+                            task.file_path = str(file_path.relative_to(task_dir.parent.parent))
+                            if not task.file_name:
+                                task.file_name = original_filename
+                            session.commit()
+                except Exception as e:
+                    print(f"[Upload Split] DB update failed: {e}")
+
+        # 5. 启动后台处理
+        from tender_ontology.services.file_service import get_file_service
+
+        file_service = get_file_service()
+        file_service.process_file(
+            file_path=file_path,
+            task_id=task_id,
+            db_task_id=db_task_id,
+            output_dir=task_dir,
+            async_mode=True
+        )
+
+        print(f"[Upload Split] Background processing started for task_id: {task_id}")
+
+        # 6. 轮询等待 split_result.json 产生
+        target_file = task_dir / f"{file_stem}_split_result.json"
+        interval = 5  # 每5秒检查一次
+        elapsed = 0
+
+        print(f"[Upload Split] Waiting for: {target_file.name}")
+
+        while not target_file.exists() and elapsed < timeout:
+            await asyncio.sleep(interval)
+            elapsed += interval
+            print(f"[Upload Split] Waiting... {elapsed}s / {timeout}s")
+
+        # 7. 检查结果
+        if target_file.exists():
+            import json
+            content = json.loads(target_file.read_text(encoding='utf-8'))
+            print(f"[Upload Split] Found split_result.json, returning content")
+
+            return PDFProcessResponse(
+                success=True,
+                errCode=None,
+                errMsg=None,
+                data={
+                    "taskId": task_id,
+                    "fileName": original_filename,
+                    "splitResult": content
+                }
+            )
+        else:
+            print(f"[Upload Split] Timeout waiting for split_result.json")
+            return PDFProcessResponse(
+                success=False,
+                errCode="TIMEOUT",
+                errMsg=f"等待 split_result.json 超时 ({timeout}秒)",
+                data={"taskId": task_id, "fileName": original_filename}
+            )
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return PDFProcessResponse(
+            success=False,
+            errCode="SPLIT_001",
+            errMsg=f"处理失败: {str(e)}",
+            data=None
+        )
+
+
 @router.get("/task/{task_id}", response_model=TaskStatusResponse, summary="查询任务状态")
 async def get_task_status(task_id: str):
     """
@@ -318,13 +489,15 @@ async def get_task_status(task_id: str):
                     data=None
                 )
 
+            # 状态映射: 2=completed, -1=failed, 其他=processing
+            status_str = "completed" if task["review_status"] == 2 else ("failed" if task["review_status"] == -1 else "processing")
             return TaskStatusResponse(
                 success=True,
                 errCode=None,
                 errMsg=None,
                 data={
                     "taskId": task["id"],
-                    "status": "completed" if task["review_status"] == 2 else "processing",
+                    "status": status_str,
                     "reviewStatus": task["review_status"],
                     "reviewResult": task["review_result"],
                     "fileName": task["file_name"],
@@ -351,13 +524,15 @@ async def get_task_status(task_id: str):
                     data=None
                 )
 
+            # 状态映射: 2=completed, -1=failed, 其他=processing
+            status_str = "completed" if task.review_status == 2 else ("failed" if task.review_status == -1 else "processing")
             return TaskStatusResponse(
                 success=True,
                 errCode=None,
                 errMsg=None,
                 data={
                     "taskId": task.id,
-                    "status": "completed" if task.review_status == 2 else "processing",
+                    "status": status_str,
                     "reviewStatus": task.review_status,
                     "reviewResult": task.review_result,
                     "fileName": task.file_name,
