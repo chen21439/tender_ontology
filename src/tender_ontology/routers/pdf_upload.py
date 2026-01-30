@@ -431,19 +431,37 @@ async def upload_pdf_split(
         # 7. 检查结果
         if target_file.exists():
             import json
-            content = json.loads(target_file.read_text(encoding='utf-8'))
-            print(f"[Upload Split] Found split_result.json, returning content")
 
-            return PDFProcessResponse(
-                success=True,
-                errCode=None,
-                errMsg=None,
-                data={
-                    "taskId": task_id,
-                    "fileName": original_filename,
-                    "splitResult": content
-                }
-            )
+            # 等待文件写入完成，重试读取
+            max_read_retries = 5
+            read_interval = 2  # 每次重试间隔2秒
+
+            for retry in range(max_read_retries):
+                try:
+                    await asyncio.sleep(read_interval)  # 等待文件写入完成
+                    content = json.loads(target_file.read_text(encoding='utf-8'))
+                    print(f"[Upload Split] Found split_result.json, returning content")
+
+                    return PDFProcessResponse(
+                        success=True,
+                        errCode=None,
+                        errMsg=None,
+                        data={
+                            "taskId": task_id,
+                            "fileName": original_filename,
+                            "splitResult": content
+                        }
+                    )
+                except json.JSONDecodeError as e:
+                    print(f"[Upload Split] JSON parse error (retry {retry + 1}/{max_read_retries}): {e}")
+                    if retry == max_read_retries - 1:
+                        # 最后一次重试仍失败
+                        return PDFProcessResponse(
+                            success=False,
+                            errCode="JSON_ERROR",
+                            errMsg=f"split_result.json 格式错误: {str(e)}",
+                            data={"taskId": task_id, "fileName": original_filename}
+                        )
         else:
             print(f"[Upload Split] Timeout waiting for split_result.json")
             return PDFProcessResponse(
